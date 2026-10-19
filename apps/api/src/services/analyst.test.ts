@@ -22,7 +22,11 @@ describe('fallbackSummary', () => {
       correction('grammar', '2'),
       correction('tense', '3'),
     ]);
-    expect(summary.focus[0]?.title).toBe('tense (2)');
+    expect(summary.focus[0]?.title).toBe('Tense (2)');
+  });
+
+  it('labels categories in sentence case', () => {
+    expect(fallbackSummary([correction('word_order', '1')]).focus[0]?.title).toBe('Word order (1)');
   });
 
   it('caps focus items at three', () => {

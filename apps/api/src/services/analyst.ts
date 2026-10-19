@@ -92,7 +92,7 @@ export function fallbackSummary(corrections: readonly Correction[]): SessionSumm
         : `You worked through ${corrections.length} correction${corrections.length === 1 ? '' : 's'} this session.`,
     strengths: corrections.length === 0 ? ['You kept the conversation going smoothly.'] : [],
     focus: top.map(([category, count]) => ({
-      title: `${category.replace('_', ' ')} (${count})`,
+      title: `${category.charAt(0).toUpperCase()}${category.slice(1).replace('_', ' ')} (${count})`,
       tip: CATEGORY_TIPS[category],
     })),
     source: 'fallback',

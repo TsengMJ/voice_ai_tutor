@@ -28,6 +28,8 @@ import {
 } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
 
+const prefersReducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
 export function DashboardPage() {
   const { data, error, loading, reload } = useAsync(api.dashboard, []);
 
@@ -193,7 +195,13 @@ function WeekChart({ data }: { data: DashboardData }) {
               }}
               formatter={(value) => [`${value} min`, 'Practice']}
             />
-            <Bar dataKey="minutes" fill="#e8603c" radius={[10, 10, 10, 10]} maxBarSize={36} />
+            <Bar
+              dataKey="minutes"
+              fill="#e8603c"
+              radius={[10, 10, 10, 10]}
+              maxBarSize={36}
+              isAnimationActive={!prefersReducedMotion()}
+            />
           </BarChart>
         </ResponsiveContainer>
       </div>

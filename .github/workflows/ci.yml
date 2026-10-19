@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ['6380:6379']
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: tutor
+          POSTGRES_PASSWORD: tutor
+          POSTGRES_DB: tutor_test
+        ports: ['5433:5432']
+        options: >-
+          --health-cmd "pg_isready -U tutor -d tutor_test"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      REDIS_URL: redis://127.0.0.1:6380
+      TEST_DATABASE_URL: postgres://tutor:tutor@127.0.0.1:5433/tutor_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build -w @tutor/core
+      - run: npx prettier --check .
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+  stack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create a placeholder .env
+        run: |
+          cp .env.example .env
+          sed -i 's/^LIVEKIT_API_KEY=.*/LIVEKIT_API_KEY=ci-placeholder/' .env
+          sed -i 's/^LIVEKIT_API_SECRET=.*/LIVEKIT_API_SECRET=ci-placeholder-secret-ci-placeholder/' .env
+          sed -i 's/^GOOGLE_API_KEY=.*/GOOGLE_API_KEY=ci-placeholder/' .env
+          sed -i 's/^COOKIE_SECRET=.*/COOKIE_SECRET=ci-cookie-secret-0123456789/' .env
+      - run: docker compose up -d --build --wait web api postgres redis
+      - run: ./scripts/smoke.sh
+      - if: failure()
+        run: docker compose logs --tail 100

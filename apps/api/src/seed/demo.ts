@@ -46,15 +46,24 @@ const SAMPLE_CORRECTIONS: Omit<Correction, 'id' | 'ts'>[] = [
 /** Practice days relative to today, chosen to show a live streak and a realistic gap. */
 const DAYS_AGO = [13, 12, 10, 9, 7, 6, 4, 3, 2, 1];
 
-function sampleTurns(scenarioIndex: number, startedAt: number): Turn[] {
+/** A short exchange in which the learner actually says the corrected phrases. */
+function sampleTurns(
+  scenarioIndex: number,
+  startedAt: number,
+  corrections: readonly Correction[],
+): Turn[] {
   const scenario = SCENARIOS[scenarioIndex % SCENARIOS.length]!;
+  const sentence = (text: string) => (/[.!?]$/.test(text) ? text : `${text}.`);
   const lines: [Turn['role'], string][] = [
     ['tutor', `Hi there! (${scenario.title}, sample session)`],
     ['learner', 'Hello! Nice to meet you.'],
-    ['tutor', 'Nice to meet you too. How is your day going?'],
-    ['learner', 'Yesterday I go to the office, today is better.'],
-    ['tutor', 'Glad today is better! What did you do at the office yesterday?'],
-    ['learner', 'I went to many meetings.'],
+    ['tutor', 'Nice to meet you too. What would you like to talk about?'],
+    ['learner', sentence(corrections[0]?.original ?? 'I am ready')],
+    [
+      'tutor',
+      `Good try! You could say: “${sentence(corrections[0]?.corrected ?? 'I am ready')}” Go on!`,
+    ],
+    ['learner', corrections[1] ? `Okay. ${sentence(corrections[1].original)}` : 'Okay, thank you!'],
   ];
   return lines.map(([role, text], i) => ({
     id: `demo-${startedAt}-${i}`,
@@ -82,16 +91,16 @@ export async function seedDemoHistory(
     const startedAt = now - daysAgo * DAY_MS - 2 * 60 * 60 * 1000;
     const voiceMs = 150_000 + ((i * 37_000) % 240_000);
     const textMs = 30_000 + ((i * 11_000) % 90_000);
-    const turns = sampleTurns(i, startedAt);
     const corrections: Correction[] = [0, 1]
       .slice(0, 1 + (i % 2))
       .map((k) => SAMPLE_CORRECTIONS[(i + k) % SAMPLE_CORRECTIONS.length]!)
       .map((c, k) => ({ ...c, id: `${sessionId}-${k}`, ts: startedAt + 60_000 }));
+    const turns = sampleTurns(i, startedAt, corrections);
     const session: SessionState = {
       id: sessionId,
       learnerId,
       scenarioId: scenario.id,
-      language: i % 4 === 3 ? 'es' : 'en',
+      language: 'en',
       timezone: 'UTC',
       mode: 'voice',
       status: 'ended',

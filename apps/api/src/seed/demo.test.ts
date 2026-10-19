@@ -39,6 +39,18 @@ describe('seedDemoHistory', () => {
     expect(await repo.countSessions(LEARNER_B)).toBe(10);
   });
 
+  it('has the learner say each corrected phrase so the review can highlight it', async () => {
+    const repo = new FakeRepository();
+    await seedDemoHistory(repo, NOW, LEARNER_A, idFactory());
+    for (const snap of repo.snapshots.values()) {
+      const said = snap.turns
+        .filter((t) => t.role === 'learner')
+        .map((t) => t.text)
+        .join(' ');
+      for (const c of snap.corrections) expect(said).toContain(c.original);
+    }
+  });
+
   it('gives every seeded correction a globally unique id', async () => {
     const repo = new FakeRepository();
     const newId = idFactory();
