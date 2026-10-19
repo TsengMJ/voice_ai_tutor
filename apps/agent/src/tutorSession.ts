@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { llm, log, voice, type JobContext } from '@livekit/agents';
-import * as google from '@livekit/agents-plugin-google';
+import { inference, llm, log, voice, type JobContext } from '@livekit/agents';
 import {
   DispatchMetadataSchema,
   GREETING_INSTRUCTION,
@@ -17,7 +16,7 @@ import {
   type SessionStore,
   type TutorEvent,
 } from '@tutor/core';
-import type { AgentConfig } from './config.js';
+import { speechOptionsFor, type AgentConfig } from './config.js';
 import { ModeController } from './modeController.js';
 import { TurnRecorder } from './turnRecorder.js';
 import { CompleteGoalArgs, RecordCorrectionArgs, createTutorToolHandlers } from './tutorTools.js';
@@ -95,13 +94,21 @@ export async function runTutorSession(ctx: JobContext, store: SessionStore, conf
     },
   });
 
+  const speech = speechOptionsFor(config.STT_MODEL, state.language);
   const session = new voice.AgentSession({
-    llm: new google.realtime.RealtimeModel({
-      model: config.GEMINI_LIVE_MODEL,
-      voice: config.GEMINI_VOICE,
-      apiKey: config.GOOGLE_API_KEY,
-      temperature: 0.8,
+    stt: new inference.STT({
+      model: config.STT_MODEL,
+      language: speech.language,
+      modelOptions: speech.modelOptions,
     }),
+    llm: new inference.LLM({ model: config.LLM_MODEL, modelOptions: { temperature: 0.8 } }),
+    tts: new inference.TTS({
+      model: config.TTS_MODEL,
+      voice: config.TTS_VOICE,
+      language: state.language,
+    }),
+    vad: new inference.VAD(),
+    turnDetection: 'stt',
   });
 
   const modes = new ModeController(
