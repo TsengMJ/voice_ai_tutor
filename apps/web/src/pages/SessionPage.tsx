@@ -27,6 +27,7 @@ import { Button, ErrorPanel, Eyebrow, Pill, Segmented, Spinner, cx } from '../co
 import { api, isNotFound } from '../lib/api';
 import { formatClock, languageLabel } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
+import { IdleContinuePrompt } from '../session/IdleContinuePrompt';
 import { Composer } from '../session/Composer';
 import { HintCard, useHint } from '../session/HintCard';
 import { Transcript } from '../session/Transcript';
@@ -206,6 +207,11 @@ function LiveSession({ review, initialMode }: { review: SessionReview; initialMo
   return (
     <RoomContext.Provider value={tutor.room}>
       <RoomAudioRenderer />
+      <IdleContinuePrompt
+        enabled={connected && tutor.mode === 'voice' && !tutor.timeUp && !ending}
+        pending={tutor.pending.length > 0}
+        onExpire={() => void finish()}
+      />
       <div className="grid h-full min-h-0 animate-rise grid-rows-[minmax(0,1fr)] gap-5 xl:grid-cols-[17rem_minmax(0,1fr)_17rem] 2xl:grid-cols-[19rem_minmax(0,1fr)_19rem]">
         <aside className="hidden min-h-0 flex-col gap-5 overflow-y-auto pb-2 xl:flex">
           <SessionTitle language={review.session.language} title={scenario.title} />
