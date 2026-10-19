@@ -112,7 +112,7 @@ A short network blip stays in the same room: the page shows "Reconnecting", and 
 
 ## Key decisions and tradeoffs
 
-**A streaming STT → LLM → TTS pipeline, not speech-to-speech.** I had already looked at both. Speech-to-speech keeps audio in one model, but the learner's transcript usually arrives only at the end of the turn, after the reply has started. This is for learning a language: seeing what was heard is the feedback, so the words need to show up while you are still talking. Streaming speech-to-text does that, and splitting the pipeline gives control over each stage:
+**A streaming STT → LLM → TTS pipeline, not speech-to-speech.** The first version used Gemini Live speech-to-speech. I was curious how a single native-audio model would actually feel. The experience was poor: the learner's transcript arrived only at the end of the turn, after the reply had started, so there was a seconds-long blank where their words should have been. For language learning, seeing what was heard is the feedback, so I switched. Streaming speech-to-text shows the words while you are still talking, and splitting the pipeline gives control over each stage:
 
 - **Deepgram Flux for speech-to-text.** Interim words stream into the chat while you talk, and Flux decides end of turn from the words and the pause together (`turnDetection: 'stt'`), so the tutor neither cuts you off mid-thought nor waits on a fixed silence timer. English practice uses the English model; Spanish and Japanese stay on the multilingual model with the practice language as a hint.
 - **Gemini 2.5 Flash for the tutor.** Fast first token and reliable tool calls (`record_correction`, `complete_goal`).
