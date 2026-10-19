@@ -1,10 +1,4 @@
-import {
-  DEMO_LEARNER_ID,
-  SCENARIOS,
-  type Correction,
-  type SessionState,
-  type Turn,
-} from '@tutor/core';
+import { SCENARIOS, type Correction, type SessionState, type Turn } from '@tutor/core';
 import type { StatsRepository } from '../db/repository.js';
 import { fallbackSummary } from '../services/analyst.js';
 
@@ -72,12 +66,18 @@ function sampleTurns(scenarioIndex: number, startedAt: number): Turn[] {
   }));
 }
 
-/** Seeds a clearly labeled sample history for the shared demo learner, once. */
-export async function seedDemoHistory(repo: StatsRepository, now: number): Promise<boolean> {
-  await repo.ensureLearner(DEMO_LEARNER_ID, true);
-  if ((await repo.countSessions(DEMO_LEARNER_ID)) > 0) return false;
+/** Seeds a clearly labeled sample history for a learner who has none yet. */
+export async function seedDemoHistory(
+  repo: StatsRepository,
+  now: number,
+  learnerId: string,
+  newId: () => string,
+): Promise<boolean> {
+  await repo.ensureLearner(learnerId, true);
+  if ((await repo.countSessions(learnerId)) > 0) return false;
 
   for (const [i, daysAgo] of DAYS_AGO.entries()) {
+    const sessionId = newId();
     const scenario = SCENARIOS[i % SCENARIOS.length]!;
     const startedAt = now - daysAgo * DAY_MS - 2 * 60 * 60 * 1000;
     const voiceMs = 150_000 + ((i * 37_000) % 240_000);
@@ -86,10 +86,10 @@ export async function seedDemoHistory(repo: StatsRepository, now: number): Promi
     const corrections: Correction[] = [0, 1]
       .slice(0, 1 + (i % 2))
       .map((k) => SAMPLE_CORRECTIONS[(i + k) % SAMPLE_CORRECTIONS.length]!)
-      .map((c, k) => ({ ...c, id: `demo-${i}-${k}`, ts: startedAt + 60_000 }));
+      .map((c, k) => ({ ...c, id: `${sessionId}-${k}`, ts: startedAt + 60_000 }));
     const session: SessionState = {
-      id: `00000000-0000-4000-8000-${String(100 + i).padStart(12, '0')}`,
-      learnerId: DEMO_LEARNER_ID,
+      id: sessionId,
+      learnerId,
       scenarioId: scenario.id,
       language: i % 4 === 3 ? 'es' : 'en',
       timezone: 'UTC',

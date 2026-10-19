@@ -56,6 +56,16 @@ describe.skipIf(!databaseUrl)('PgStatsRepository (requires TEST_DATABASE_URL)', 
     expect(await migrate(pool, migrationsDir)).toEqual([]);
   });
 
+  it('remembers which learners were created with sample history', async () => {
+    const demo = randomUUID();
+    await repo.ensureLearner(demo, true);
+    expect(await repo.isDemoLearner(demo)).toBe(true);
+  });
+
+  it('treats unknown learners as not demo', async () => {
+    expect(await repo.isDemoLearner(randomUUID())).toBe(false);
+  });
+
   it('flushing the same snapshot twice does not double count', async () => {
     const learnerId = randomUUID();
     const s = session(learnerId);

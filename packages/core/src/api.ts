@@ -12,8 +12,6 @@ import type { Language } from './languages.js';
 import { LANGUAGE_CODES } from './languages.js';
 import type { Scenario } from './scenarios.js';
 
-export const DEMO_LEARNER_ID = '00000000-0000-4000-8000-000000000001';
-
 export const CreateSessionRequestSchema = z.object({
   scenarioId: z.string().min(1),
   language: z.enum(LANGUAGE_CODES),

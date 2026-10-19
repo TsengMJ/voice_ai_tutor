@@ -1,7 +1,6 @@
 import {
   ConnectionRequestSchema,
   CreateSessionRequestSchema,
-  DEMO_LEARNER_ID,
   LANGUAGES,
   SCENARIOS,
   dayInTimeZone,
@@ -32,10 +31,12 @@ export interface AppDeps {
   cookieSecret: string;
   cookieSecure: boolean;
   corsOrigin: string;
-  seedDemo: boolean;
+  /** When set, every new learner starts with a labeled sample history. */
+  seedSampleHistory?: (learnerId: string) => Promise<void>;
 }
 
 const SessionId = z.uuid();
+const NEW_LEARNERS_PER_HOUR = 30;
 
 export function createApp(deps: AppDeps) {
   const app = express();
@@ -52,11 +53,24 @@ export function createApp(deps: AppDeps) {
     res.status(ok ? 200 : 503).json({ ok, checks });
   });
 
+  app.get('/api/scenarios', (_req, res) => {
+    const catalog: Catalog = { scenarios: [...SCENARIOS], languages: [...LANGUAGES] };
+    res.json(catalog);
+  });
+
   app.use(
     '/api',
     learnerIdentity({
       secure: deps.cookieSecure,
-      defaultLearnerId: deps.seedDemo ? DEMO_LEARNER_ID : undefined,
+      onNewLearner: async (learnerId, req) => {
+        const allowed = await deps.limiter.hit(
+          `new-learner:${req.ip}`,
+          NEW_LEARNERS_PER_HOUR,
+          3600,
+        );
+        if (!allowed) throw new AppError(429, 'rate_limited', 'Too many new visitors from here.');
+        await (deps.seedSampleHistory?.(learnerId) ?? deps.repo.ensureLearner(learnerId, false));
+      },
     }),
   );
 
@@ -77,18 +91,13 @@ export function createApp(deps: AppDeps) {
     return parsed.data;
   };
 
-  app.get('/api/scenarios', (_req, res) => {
-    const catalog: Catalog = { scenarios: [...SCENARIOS], languages: [...LANGUAGES] };
-    res.json(catalog);
-  });
-
   app.get('/api/me', async (_req, res) => {
     const learnerId = learnerIdOf(res);
-    const me: Me = {
-      learnerId,
-      isDemo: learnerId === DEMO_LEARNER_ID,
-      activeSessionId: await deps.sessions.activeSessionId(learnerId),
-    };
+    const [isDemo, activeSessionId] = await Promise.all([
+      deps.repo.isDemoLearner(learnerId),
+      deps.sessions.activeSessionId(learnerId),
+    ]);
+    const me: Me = { learnerId, isDemo, activeSessionId };
     res.json(me);
   });
 
@@ -96,15 +105,12 @@ export function createApp(deps: AppDeps) {
     const learnerId = learnerIdOf(res);
     const tz =
       typeof req.query.tz === 'string' && isValidTimeZone(req.query.tz) ? req.query.tz : 'UTC';
-    const [stats, activeSessionId] = await Promise.all([
+    const [stats, isDemo, activeSessionId] = await Promise.all([
       deps.repo.getDashboard(learnerId, dayInTimeZone(deps.now(), tz)),
+      deps.repo.isDemoLearner(learnerId),
       deps.sessions.activeSessionId(learnerId),
     ]);
-    const data: DashboardData = {
-      ...stats,
-      isDemo: learnerId === DEMO_LEARNER_ID,
-      activeSessionId,
-    };
+    const data: DashboardData = { ...stats, isDemo, activeSessionId };
     res.json(data);
   });
 

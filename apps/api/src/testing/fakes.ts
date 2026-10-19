@@ -12,11 +12,14 @@ import { SessionService } from '../services/sessionService.js';
 
 export class FakeRepository implements StatsRepository {
   readonly snapshots = new Map<string, SessionSnapshot>();
-  readonly learners = new Set<string>();
+  readonly learners = new Map<string, boolean>();
 
   async ping() {}
-  async ensureLearner(id: string) {
-    this.learners.add(id);
+  async ensureLearner(id: string, isDemo: boolean) {
+    if (!this.learners.has(id)) this.learners.set(id, isDemo);
+  }
+  async isDemoLearner(id: string) {
+    return this.learners.get(id) ?? false;
   }
   async upsertScenarios(_scenarios: readonly Scenario[]) {}
 

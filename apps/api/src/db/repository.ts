@@ -36,6 +36,7 @@ export type DashboardStats = Omit<DashboardData, 'isDemo' | 'activeSessionId'>;
 export interface StatsRepository {
   ping(): Promise<void>;
   ensureLearner(id: string, isDemo: boolean): Promise<void>;
+  isDemoLearner(id: string): Promise<boolean>;
   upsertScenarios(scenarios: readonly Scenario[]): Promise<void>;
   saveSnapshot(snapshot: SessionSnapshot): Promise<void>;
   getReview(sessionId: string): Promise<StoredReview | null>;
@@ -74,6 +75,14 @@ export class PgStatsRepository implements StatsRepository {
       'insert into learners (id, is_demo) values ($1, $2) on conflict (id) do nothing',
       [id, isDemo],
     );
+  }
+
+  async isDemoLearner(id: string) {
+    const { rows } = await this.pool.query<{ is_demo: boolean }>(
+      'select is_demo from learners where id = $1',
+      [id],
+    );
+    return rows[0]?.is_demo ?? false;
   }
 
   async upsertScenarios(scenarios: readonly Scenario[]) {

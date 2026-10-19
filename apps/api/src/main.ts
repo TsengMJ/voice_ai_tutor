@@ -26,9 +26,6 @@ async function main() {
 
   const repo = new PgStatsRepository(pool);
   await repo.upsertScenarios(SCENARIOS);
-  if (config.SEED_DEMO && (await seedDemoHistory(repo, Date.now()))) {
-    logger.info('seeded sample history for the demo learner');
-  }
 
   const store = new RedisSessionStore(redis);
   const sessions = new SessionService({
@@ -55,7 +52,11 @@ async function main() {
     cookieSecret: config.COOKIE_SECRET,
     cookieSecure: config.COOKIE_SECURE,
     corsOrigin: config.CORS_ORIGIN,
-    seedDemo: config.SEED_DEMO,
+    seedSampleHistory: config.SEED_DEMO
+      ? async (learnerId) => {
+          await seedDemoHistory(repo, Date.now(), learnerId, randomUUID);
+        }
+      : undefined,
     health: async () => ({
       redis: await redis.ping().then(
         () => true,
