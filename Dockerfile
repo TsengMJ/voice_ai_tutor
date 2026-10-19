@@ -23,6 +23,10 @@ RUN npm prune --omit=dev --no-audit --no-fund
 
 FROM node:22-bookworm-slim AS node-runtime
 ENV NODE_ENV=production
+# @livekit/rtc-node verifies TLS against the OS trust store, which the slim image omits.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=prod-deps /app/node_modules node_modules
 COPY --from=build /app/packages/core/package.json packages/core/package.json
