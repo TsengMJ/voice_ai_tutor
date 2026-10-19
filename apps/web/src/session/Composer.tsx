@@ -49,9 +49,7 @@ export function Composer({
         rows={1}
         disabled={disabled}
         aria-label="Message your tutor"
-        placeholder={
-          mode === 'voice' ? 'Speaking is on — you can also type here' : 'Type your reply…'
-        }
+        placeholder={mode === 'voice' ? 'Speak, or type a message…' : 'Type your reply…'}
         className="max-h-32 min-h-10 flex-1 resize-none bg-transparent py-2.5 text-[15px] outline-none placeholder:text-muted disabled:opacity-50"
       />
       <button

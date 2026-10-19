@@ -4,15 +4,14 @@ import { useState } from 'react';
 import { Button } from '../components/ui';
 import { api } from '../lib/api';
 
-export function HintCard({
-  sessionId,
-  disabled,
-  onUse,
-}: {
-  sessionId: string;
-  disabled: boolean;
-  onUse: (text: string) => void;
-}) {
+export interface HintState {
+  hint: Hint | null;
+  loading: boolean;
+  error: string | null;
+  ask: () => Promise<void>;
+}
+
+export function useHint(sessionId: string): HintState {
   const [hint, setHint] = useState<Hint | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -29,6 +28,19 @@ export function HintCard({
     }
   };
 
+  return { hint, loading, error, ask };
+}
+
+export function HintCard({
+  state,
+  disabled,
+  onUse,
+}: {
+  state: HintState;
+  disabled: boolean;
+  onUse: (text: string) => void;
+}) {
+  const { hint, loading, error, ask } = state;
   return (
     <div className="rounded-3xl border border-butter/60 bg-butter-soft/70 p-5">
       <div className="flex items-center justify-between gap-3">

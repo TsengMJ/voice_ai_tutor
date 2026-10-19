@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from 'react-router-dom';
+import { NavLink, Outlet, useMatch } from 'react-router-dom';
 import { cx } from './ui';
 
 export function Wordmark() {
@@ -27,10 +27,16 @@ const navItem = ({ isActive }: { isActive: boolean }) =>
   );
 
 export function Layout() {
+  const inSession = useMatch('/practice/:id') !== null;
   return (
-    <div className="min-h-dvh">
-      <header className="sticky top-0 z-20 border-b border-line/70 bg-paper/80 backdrop-blur">
-        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-5">
+    <div className={inSession ? 'flex h-dvh flex-col' : 'min-h-dvh'}>
+      <header className="sticky top-0 z-20 shrink-0 border-b border-line/70 bg-paper/80 backdrop-blur">
+        <div
+          className={cx(
+            'mx-auto flex h-16 items-center justify-between',
+            inSession ? 'max-w-[90rem] px-3 md:px-5' : 'max-w-6xl px-5',
+          )}
+        >
           <NavLink to="/" aria-label="Parla home">
             <Wordmark />
           </NavLink>
@@ -44,7 +50,13 @@ export function Layout() {
           </nav>
         </div>
       </header>
-      <main className="mx-auto max-w-6xl px-5 py-8 md:py-12">
+      <main
+        className={
+          inSession
+            ? 'mx-auto min-h-0 w-full max-w-[90rem] flex-1 overflow-y-auto px-3 py-3 md:px-5 md:py-4'
+            : 'mx-auto max-w-6xl px-5 py-8 md:py-12'
+        }
+      >
         <Outlet />
       </main>
     </div>
