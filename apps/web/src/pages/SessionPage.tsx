@@ -13,6 +13,7 @@ import {
   Keyboard,
   Lightbulb,
   ListChecks,
+  Loader2,
   Mic,
   SpellCheck,
   X,
@@ -23,7 +24,7 @@ import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-route
 import { CorrectionCard } from '../components/CorrectionCard';
 import { GoalList } from '../components/GoalList';
 import { Button, ErrorPanel, Eyebrow, Pill, Segmented, Spinner, cx } from '../components/ui';
-import { api } from '../lib/api';
+import { api, isNotFound } from '../lib/api';
 import { formatClock, languageLabel } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
 import { Composer } from '../session/Composer';
@@ -39,7 +40,16 @@ export function SessionPage() {
   const review = useAsync(() => api.session(id), [id]);
 
   if (review.loading && !review.data) return <Spinner label="Opening your session" />;
-  if (review.error || !review.data) {
+  if (review.error && !isNotFound(review.error)) {
+    return (
+      <ErrorPanel
+        title="Couldn't open your session"
+        message={review.error.message}
+        action={<Button onClick={review.reload}>Try again</Button>}
+      />
+    );
+  }
+  if (!review.data) {
     return (
       <ErrorPanel
         title="Session not found"
@@ -86,6 +96,7 @@ function LiveSession({ review, initialMode }: { review: SessionReview; initialMo
   const hint = useHint(sessionId);
   const [draft, setDraft] = useState('');
   const [ending, setEnding] = useState(false);
+  const [endError, setEndError] = useState<string | null>(null);
   const [panel, setPanel] = useState<Panel | null>(null);
   const [seenCorrections, setSeenCorrections] = useState(tutor.corrections.length);
 
@@ -100,12 +111,20 @@ function LiveSession({ review, initialMode }: { review: SessionReview; initialMo
 
   const finish = async () => {
     setEnding(true);
+    setEndError(null);
     await tutor.disconnect();
     try {
       await api.end(sessionId);
-    } finally {
       navigate(`/sessions/${sessionId}`);
+    } catch (err) {
+      setEnding(false);
+      setEndError((err as Error).message);
     }
+  };
+
+  const keepPracticing = () => {
+    setEndError(null);
+    tutor.retry();
   };
 
   const togglePanel = (next: Panel) => {
@@ -119,6 +138,25 @@ function LiveSession({ review, initialMode }: { review: SessionReview; initialMo
     setDraft(text);
     setPanel(null);
   };
+
+  if (endError) {
+    return (
+      <ErrorPanel
+        title="Couldn't save your session"
+        message={endError}
+        action={
+          <div className="flex gap-3">
+            <Button variant="secondary" onClick={keepPracticing}>
+              Keep practicing
+            </Button>
+            <Button loading={ending} onClick={finish}>
+              Try again
+            </Button>
+          </div>
+        }
+      />
+    );
+  }
 
   if (tutor.status === 'failed') {
     return (
@@ -221,6 +259,16 @@ function LiveSession({ review, initialMode }: { review: SessionReview; initialMo
             className="mx-auto mt-3 rounded-full bg-coral px-4 py-2 text-sm font-semibold text-white"
           />
 
+          {tutor.status === 'reconnecting' && (
+            <div
+              role="status"
+              className="mx-3 mt-3 flex items-center gap-2 rounded-2xl bg-butter-soft px-4 py-2.5 text-sm font-semibold text-[#8a6416]"
+            >
+              <Loader2 className="size-4 animate-spin" aria-hidden /> Connection dropped.
+              Reconnecting to your tutor…
+            </div>
+          )}
+
           {tutor.notice && (
             <div className="mx-3 mt-3 flex items-center justify-between gap-3 rounded-2xl bg-butter-soft px-4 py-2.5 text-sm font-semibold text-[#8a6416]">
               {tutor.notice}
@@ -270,7 +318,12 @@ function LiveSession({ review, initialMode }: { review: SessionReview; initialMo
                     {panel === 'hint' && (
                       <HintCard state={hint} disabled={tutor.timeUp} onUse={applyHint} />
                     )}
-                    {panel === 'corrections' && <CorrectionList corrections={tutor.corrections} />}
+                    {panel === 'corrections' && (
+                      <CorrectionList
+                        corrections={tutor.corrections}
+                        language={review.session.language}
+                      />
+                    )}
                   </div>
                 </div>
               </div>
@@ -301,7 +354,7 @@ function LiveSession({ review, initialMode }: { review: SessionReview; initialMo
             <p className="mb-3 text-xs font-bold uppercase tracking-[0.14em] text-muted">
               Corrections · {tutor.corrections.length}
             </p>
-            <CorrectionList corrections={tutor.corrections} />
+            <CorrectionList corrections={tutor.corrections} language={review.session.language} />
           </div>
         </aside>
       </div>
@@ -459,7 +512,13 @@ function ScenarioBrief({ scenario, completed }: { scenario: Scenario; completed:
   );
 }
 
-function CorrectionList({ corrections }: { corrections: Correction[] }) {
+function CorrectionList({
+  corrections,
+  language,
+}: {
+  corrections: Correction[];
+  language: string;
+}) {
   if (corrections.length === 0) {
     return (
       <p className="rounded-3xl border border-dashed border-line p-5 text-sm text-muted">
@@ -470,7 +529,7 @@ function CorrectionList({ corrections }: { corrections: Correction[] }) {
   return (
     <div className="space-y-3">
       {[...corrections].reverse().map((c) => (
-        <CorrectionCard key={c.id} correction={c} />
+        <CorrectionCard key={c.id} correction={c} language={language} />
       ))}
     </div>
   );

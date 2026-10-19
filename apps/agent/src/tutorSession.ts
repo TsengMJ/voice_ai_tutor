@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { inference, llm, log, voice, type JobContext } from '@livekit/agents';
+import { DisconnectReason, RoomEvent } from '@livekit/rtc-node';
 import {
+  ABNORMAL_CLIENT_DISCONNECT,
   DispatchMetadataSchema,
   GREETING_INSTRUCTION,
   LIMITS,
@@ -16,7 +18,8 @@ import {
   type SessionStore,
   type TutorEvent,
 } from '@tutor/core';
-import { speechOptionsFor, type AgentConfig } from './config.js';
+import { speechOptionsFor, ttsOptionsFor, type AgentConfig } from './config.js';
+import { DisconnectGrace } from './disconnectGrace.js';
 import { LatencyTracker } from './latencyTracker.js';
 import { ModeController } from './modeController.js';
 import { TurnRecorder } from './turnRecorder.js';
@@ -98,7 +101,7 @@ export async function runTutorSession(ctx: JobContext, store: SessionStore, conf
   const speech = speechOptionsFor(config.STT_MODEL, state.language);
   const session = new voice.AgentSession({
     stt: new inference.STT({
-      model: config.STT_MODEL,
+      model: speech.model,
       language: speech.language,
       modelOptions: speech.modelOptions,
     }),
@@ -107,6 +110,7 @@ export async function runTutorSession(ctx: JobContext, store: SessionStore, conf
       model: config.TTS_MODEL,
       voice: config.TTS_VOICE,
       language: state.language,
+      modelOptions: ttsOptionsFor(config.TTS_MODEL),
     }),
     vad: new inference.VAD(),
     turnDetection: 'stt',
@@ -203,7 +207,44 @@ export async function runTutorSession(ctx: JobContext, store: SessionStore, conf
     }
   }, remaining);
 
+  const grace = new DisconnectGrace({
+    onMute: () => session.output.setAudioEnabled(false),
+    onRestore: () => session.output.setAudioEnabled(modes.current === 'voice'),
+    onRejoin: () => {
+      session
+        .generateReply({ instructions: RESUME_INSTRUCTION })
+        .waitForPlayout()
+        .catch((err: unknown) => {
+          logger.warn({ err }, 'resume line after reconnect did not start');
+        });
+    },
+    onExpire: () => {
+      void (async () => {
+        try {
+          await store.setEndReason(sessionId, ABNORMAL_CLIENT_DISCONNECT);
+          await ctx.deleteRoom();
+        } catch (err) {
+          logger.warn({ err, sessionId }, 'failed to record abnormal disconnect');
+        } finally {
+          ctx.shutdown('abnormal client disconnect');
+        }
+      })();
+    },
+  });
+
+  ctx.room.on(RoomEvent.ParticipantDisconnected, (participant) => {
+    if (participant.identity !== state.learnerId) return;
+    const reason = participant.disconnectReason;
+    const name = reason === undefined ? undefined : DisconnectReason[reason];
+    grace.learnerLeft(typeof name === 'string' ? name : undefined);
+  });
+  ctx.room.on(RoomEvent.ParticipantConnected, (participant) => {
+    if (participant.identity !== state.learnerId) return;
+    grace.learnerReturned();
+  });
+
   ctx.addShutdownCallback(async () => {
+    grace.cancel();
     clearTimeout(timeLimit);
     await modes.stop();
     await store.markDirty(sessionId);

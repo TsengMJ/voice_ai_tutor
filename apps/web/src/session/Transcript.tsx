@@ -9,7 +9,12 @@ import { Keyboard, Mic } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { cx } from '../components/ui';
 import { retireSegments, selectLiveDrafts, type LiveDraft, type LiveStream } from './liveDrafts';
-import { nextSpeechPhase, type SpeechPhase } from './speechPhase';
+import {
+  HEARING_HOLD_MS,
+  learnerIsAudible,
+  nextSpeechPhase,
+  type SpeechPhase,
+} from './speechPhase';
 import type { PendingMessage } from './useTutorSession';
 
 /**
@@ -95,10 +100,34 @@ const CUE_LABEL: Record<Exclude<SpeechPhase, 'idle'>, string> = {
   holding: 'Got it',
 };
 
-/** Learner-side cue covering the gap before Gemini sends back what was said. */
+/** Learner-side cue covering the gap before the transcript arrives. */
+function useAudibleMic(micActive: boolean, tutorSpeaking: boolean): boolean {
+  const [since, setSince] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!micActive || tutorSpeaking) {
+      setSince(null);
+      return;
+    }
+    const started = Date.now();
+    setSince(started);
+    setNow(started);
+    const timer = setTimeout(() => setNow(Date.now()), HEARING_HOLD_MS);
+    return () => clearTimeout(timer);
+  }, [micActive, tutorSpeaking]);
+
+  return learnerIsAudible({
+    micActive: since !== null,
+    micActiveForMs: since === null ? 0 : now - since,
+    tutorSpeaking,
+  });
+}
+
 function useLearnerCue(mode: Mode, turns: Turn[], hasDraft: boolean): SpeechPhase {
   const { localParticipant } = useLocalParticipant();
-  const speaking = useIsSpeaking(localParticipant);
+  const { state } = useVoiceAssistant();
+  const speaking = useAudibleMic(useIsSpeaking(localParticipant), state === 'speaking');
   const learnerTurns = turns.reduce((count, turn) => count + (turn.role === 'learner' ? 1 : 0), 0);
   const [phase, setPhase] = useState<SpeechPhase>('idle');
   const [baseline, setBaseline] = useState(learnerTurns);

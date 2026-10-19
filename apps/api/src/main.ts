@@ -1,16 +1,18 @@
 import { randomUUID } from 'node:crypto';
-import { RedisSessionStore, SCENARIOS } from '@tutor/core';
+import { REDIS_CLIENT_OPTIONS, RedisSessionStore, SCENARIOS } from '@tutor/core';
 import { Redis } from 'ioredis';
 import pg from 'pg';
 import { pino } from 'pino';
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
 import { migrate } from './db/migrate.js';
+import { POSTGRES_POOL_OPTIONS } from './db/pool.js';
 import { PgStatsRepository } from './db/repository.js';
 import { Flusher } from './flusher.js';
 import { seedDemoHistory } from './seed/demo.js';
 import { GeminiAnalyst } from './services/analyst.js';
 import { LiveKitCloudGateway } from './services/livekit.js';
+import { RedisLocks } from './services/locks.js';
 import { RedisRateLimiter } from './services/rateLimiter.js';
 import { SessionService } from './services/sessionService.js';
 
@@ -18,8 +20,14 @@ const logger = pino({ name: 'api', redact: ['req.headers.cookie', 'token'] });
 
 async function main() {
   const config = loadConfig();
-  const pool = new pg.Pool({ connectionString: config.DATABASE_URL, max: 10 });
-  const redis = new Redis(config.REDIS_URL, { maxRetriesPerRequest: 3 });
+  const pool = new pg.Pool({
+    connectionString: config.DATABASE_URL,
+    ...POSTGRES_POOL_OPTIONS,
+  });
+  // Without listeners, a dropped idle connection is an unhandled 'error' event that exits Node.
+  pool.on('error', (err) => logger.error({ err }, 'idle postgres client error'));
+  const redis = new Redis(config.REDIS_URL, REDIS_CLIENT_OPTIONS);
+  redis.on('error', (err) => logger.warn({ err }, 'redis connection error; reconnecting'));
 
   const applied = await migrate(pool, config.MIGRATIONS_DIR);
   if (applied.length > 0) logger.info({ applied }, 'database migrations applied');
@@ -37,7 +45,12 @@ async function main() {
       apiSecret: config.LIVEKIT_API_SECRET,
       agentName: config.AGENT_NAME,
     }),
-    analyst: new GeminiAnalyst(config.GOOGLE_API_KEY, config.GEMINI_TEXT_MODEL),
+    analyst: new GeminiAnalyst(
+      config.GOOGLE_API_KEY,
+      config.GEMINI_TEXT_MODEL,
+      config.GEMINI_HINT_MODEL,
+    ),
+    locks: new RedisLocks(redis),
     logger,
     now: Date.now,
     newId: randomUUID,
@@ -77,8 +90,8 @@ async function main() {
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'shutting down');
     flusher.stop();
-    server.close();
-    await flusher.tick();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await flusher.drain();
     await Promise.allSettled([redis.quit(), pool.end()]);
     process.exit(0);
   };

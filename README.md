@@ -4,11 +4,13 @@ Short role-play conversations with a tutor that **listens, lets you interrupt, q
 
 Built on **LiveKit Agents (Node)** with a streaming **speech-to-text → LLM → text-to-speech** pipeline (Deepgram Flux, Gemini 2.5 Flash, Cartesia Sonic-3 on LiveKit Inference), a Node API, React, Redis and Postgres. Everything runs with `docker compose up`.
 
-| Dashboard                                    | Scenario picker                                  |
-| -------------------------------------------- | ------------------------------------------------ |
-| ![Dashboard](docs/screenshots/dashboard.png) | ![Practice](docs/screenshots/practice.png)       |
-| **Session review**                           | **Mobile**                                       |
-| ![Review](docs/screenshots/review.png)       | ![Mobile](docs/screenshots/mobile-dashboard.png) |
+| Dashboard                                            | Scenario picker                                                      |
+| ---------------------------------------------------- | -------------------------------------------------------------------- |
+| ![Dashboard](docs/screenshots/dashboard.png)         | ![Practice](docs/screenshots/practice.png)                           |
+| **Session review**                                   | **Mobile**                                                           |
+| ![Review](docs/screenshots/review.png)               | ![Mobile](docs/screenshots/mobile-dashboard.png)                     |
+| **Hear a pronunciation**                             | **Playing**                                                          |
+| ![Pronunciation](docs/screenshots/pronunciation.png) | ![Pronunciation playing](docs/screenshots/pronunciation-playing.png) |
 
 > The live session page needs real LiveKit keys to show anything but its connection screen, so it's covered in the video walkthrough rather than a screenshot.
 
@@ -50,10 +52,10 @@ Without those two URLs the Redis and Postgres integration tests skip and the res
 I studied Speak, SpeakBuddy and Pimsleur before designing. The thing that separates a _tutor_ from a voice chatbot is structure and feedback, so that's where the effort went:
 
 - **Role-play scenarios with goals.** Three scenes (Beginner → Advanced), each with three concrete goals ("Order a drink with one customization"). The tutor calls a `complete_goal` tool when you achieve one, and the checklist ticks live. Goals give a beginner something to say and give the session an end.
-- **Corrections that don't interrupt.** Following Pimsleur's "don't break the flow" principle, the tutor only _recasts_ errors aloud (repeats your sentence correctly) and silently calls `record_correction`. A card appears beside the conversation with the original, the fix, a one-line why, and a category.
+- **Corrections that don't interrupt.** Following Pimsleur's "don't break the flow" principle, the tutor only _recasts_ errors aloud (repeats your sentence correctly) and silently calls `record_correction`. A card appears beside the conversation with the original, the fix, a one-line why, and a category. Every correction card has a speaker button that plays the corrected wording in the practice language, both during the session and on the review page.
 - **Words appear as you speak, and barge-in.** Speech-to-text streams your words into the chat while you're still talking, and a "Got it" / "Thinking" cue covers the gap before the reply. Voice activity detection stops the tutor the moment you start speaking; interrupted tutor turns are marked "cut off" in the transcript.
 - **Voice ⇄ text, one conversation.** "I'm on the train" is a real use case. Switching modes is instant and the tutor keeps full context (see the architecture section for how).
-- **Hints when stuck.** One tap asks a text model for a natural next line plus translation; "Put it in the message box" pre-fills the composer.
+- **Hints when stuck.** One tap asks Gemini Flash-Lite, with thinking kept minimal, for a natural next line plus translation; "Put it in the message box" pre-fills the composer. The slower text model is only used for the end-of-session summary.
 - **Review page.** Coach's notes (strengths and up to 3 focus areas), goals, every correction, and the full transcript with your corrected phrases highlighted. Like SpeakBuddy, detailed feedback lives after the session so it doesn't crowd the live view.
 - **Dashboard.** Today / week minutes, streak, average tutor response latency, 7-day chart, voice vs. text split, totals, recent sessions (resumable), and recurring mistake categories.
 - **Three target languages** (English, Spanish, Japanese), so a reviewer can actually be a learner.
@@ -101,23 +103,23 @@ The code is split along the three concerns the brief asks for:
 2. `POST /api/sessions/:id/connection` returns a **10-minute token scoped to a fresh room** (`tutor-{sessionId}-{random}`). The token embeds an explicit **agent dispatch with `{ sessionId }` metadata set server-side**, so a client can't point the agent at someone else's session.
 3. The agent joins and validates: the session exists, is active, its current room matches, and time remains. It loads the last 20 turns into the model's chat context and completed goals into the instructions, then greets (or says "welcome back" when resuming).
 4. During the conversation the agent appends turns, corrections, goals, voice time and latency samples to Redis and marks the session dirty. It publishes `turn` / `correction` / `goals` / `mode` / `time_up` events to the browser on a data topic.
-5. The API's flusher upserts dirty sessions into Postgres every 15 s (idempotently: turns keyed by sequence, corrections by id, `daily_stats` recomputed per learner-day).
-6. `POST /api/sessions/:id/end` does a final flush, generates the summary (Gemini Flash, with a deterministic fallback), and deletes the LiveKit room.
+5. The API's flusher copies dirty sessions into Postgres every 15 s. It claims a batch, appends only turns past the sequence already stored, upserts corrections by id, recomputes `daily_stats` for that learner-day, then acknowledges the claim. A Redis lock keeps flush and end from writing the same session at once, and a snapshot older than the row already stored is ignored. A claim left behind by a replica that died mid-write goes back on the queue.
+6. `POST /api/sessions/:id/end` takes the same lock, does a final flush, generates the summary (Gemini Flash, with a deterministic fallback), and deletes the LiveKit room.
 
-Refreshing the page or losing the network repeats step 2: a new room, a new agent, history reloaded from Redis. The old room's agent closes when the learner leaves (or when LiveKit closes the empty room after a network drop), and a late dispatch for a stale room sees the room name no longer matches and leaves without speaking.
+A short network blip stays in the same room: the page shows "Reconnecting", and once LiveKit is back it fills in any turns the outage dropped. Refreshing the page, or a drop that does not recover, repeats step 2: a new room, a new agent, history reloaded from Redis. The old room's agent closes when the learner leaves (or when LiveKit closes the empty room), and a late dispatch for a stale room sees the room name no longer matches and leaves without speaking.
 
 ---
 
 ## Key decisions and tradeoffs
 
-**A streaming STT → LLM → TTS pipeline, not speech-to-speech.** The first version used Gemini Live (one native-audio model). In testing, the learner's own words only appeared after the tutor had finished generating its reply, because the realtime model emits the user transcript at the end of the turn. For a language learner, seeing what the tutor heard is the feedback, so a seconds-long blank felt broken. The pipeline fixes that and gives control over each stage:
+**A streaming STT → LLM → TTS pipeline, not speech-to-speech.** I had already looked at both. Speech-to-speech keeps audio in one model, but the learner's transcript usually arrives only at the end of the turn, after the reply has started. This is for learning a language: seeing what was heard is the feedback, so the words need to show up while you are still talking. Streaming speech-to-text does that, and splitting the pipeline gives control over each stage:
 
-- **Deepgram Flux (multilingual) for speech-to-text.** Interim words stream into the chat while you talk, and Flux decides end of turn from the words and the pause together (`turnDetection: 'stt'`), so the tutor neither cuts you off mid-thought nor waits on a fixed silence timer. The practice language goes in as a hint.
+- **Deepgram Flux for speech-to-text.** Interim words stream into the chat while you talk, and Flux decides end of turn from the words and the pause together (`turnDetection: 'stt'`), so the tutor neither cuts you off mid-thought nor waits on a fixed silence timer. English practice uses the English model; Spanish and Japanese stay on the multilingual model with the practice language as a hint.
 - **Gemini 2.5 Flash for the tutor.** Fast first token and reliable tool calls (`record_correction`, `complete_goal`).
-- **Cartesia Sonic-3 for text-to-speech.** Very low time to first audio, and one multilingual voice covers English, Spanish and Japanese.
-- **Silero VAD for barge-in.** It runs locally in the agent and stops the tutor's audio as soon as you start talking.
+- **Cartesia Sonic-3 for text-to-speech.** Very low time to first audio, and one multilingual voice covers English, Spanish and Japanese. Cartesia is asked for a timestamp on every word, so the tutor's transcript appears as each word is spoken.
+- **Silero VAD for barge-in.** It runs locally in the agent and stops the tutor's audio as soon as you start talking. The Listening cue waits a fraction of a second so a noise blip does not flash the bubble; the words themselves are never thrown away after they appear.
 
-All three models run on **LiveKit Inference**, billed to the LiveKit project, so there are no extra vendor keys and the agent no longer holds the Google key at all. Each model is an env var (`STT_MODEL`, `LLM_MODEL`, `TTS_MODEL`, `TTS_VOICE`), so swapping a vendor is a config change. The cost of this choice: three hops instead of one, so latency is the sum of the stages, and the tutor hears words rather than tone. Response latency is measured per reply as end of turn + LLM first token + TTS first audio, and shown on the review page and dashboard (about 2–3 s through Docker Desktop on a laptop in my tests).
+All three models run on **LiveKit Inference**, billed to the LiveKit project, so there are no extra vendor keys and the agent does not hold a Google key. Each model is an env var (`STT_MODEL`, `LLM_MODEL`, `TTS_MODEL`, `TTS_VOICE`), so swapping a vendor is a config change. The cost of this choice: three hops instead of one, so latency is the sum of the stages, and the tutor hears words rather than tone. Response latency is measured per reply as end of turn + LLM first token + TTS first audio, and shown on the review page and dashboard (about 2–3 s through Docker Desktop on a laptop in my tests).
 
 **Voice and text share one agent session.** The obvious design is a separate text path (REST → text LLM) with a reconnect on every switch. That gives the tutor two brains, and switching takes seconds. Instead, the browser stays in the room: text goes over LiveKit's `lk.chat` stream into the same LLM conversation, and a `tutor.set_mode` RPC toggles the agent's audio input/output. Switching is instant and context is literally the same conversation. With the pipeline, text mode simply skips speech-to-text and text-to-speech, so a typed turn costs only LLM tokens.
 
@@ -132,7 +134,7 @@ All three models run on **LiveKit Inference**, billed to the LiveKit project, so
 | Learners, sessions, turns, corrections, summaries                  | **Postgres**                            | Durable history, the review page, and relational queries.                                                           |
 | `daily_stats` (per learner-day, in the learner's time zone)        | **Postgres**                            | The dashboard reads a small pre-aggregated table instead of scanning turns.                                         |
 
-The agent never touches Postgres, which keeps the realtime path free of slow queries. The flusher bridges the two stores asynchronously, and failures are retried by re-marking the session dirty. The tradeoff is that the dashboard can lag a live session by up to 15 s; ending a session flushes immediately.
+The agent never touches Postgres, which keeps the realtime path free of slow queries. The flusher bridges the two stores asynchronously. A failed flush is re-queued. Hints, LiveKit room deletion, Redis turn writes, and the browser's reads are retried once or twice; a session summary is not, and a Redis command that timed out is not sent again. Creating a session takes a per-learner lock so two clicks cannot leave two active sessions. The tradeoff is that the dashboard can lag a live session by up to 15 s; ending a session flushes immediately.
 
 **Measuring "usage time" honestly.** Voice time is measured by the agent while audio mode is on. Text time can't be observed directly, so it's estimated from the gaps between typed messages: each gap counts up to 60 s, and a burst after a long pause counts 15 s. This is documented in `packages/core/src/timing.ts` and unit-tested.
 
@@ -187,7 +189,7 @@ db/migrations/   SQL migrations, applied automatically on API start
 scripts/smoke.sh End-to-end check against the running stack
 ```
 
-Tests: 117 across the workspaces (Vitest). They cover prompt assembly, streak and timing math, protocol decoding, the Redis store, agent config, tool handlers, mode switching and latency accounting, the session service, the HTTP surface (auth, isolation, validation, rate limits), Postgres aggregation and idempotency, demo seeding, transcript highlighting, live transcript drafts and speech cues.
+Tests: 155 across the workspaces (Vitest). They cover prompt assembly, streak and timing math, protocol decoding, the Redis store, agent config, tool handlers, mode switching and latency accounting, the session service (including locks and a single active session under a race), the HTTP surface (auth, isolation, validation, rate limits), Postgres aggregation, incremental flush and stale-snapshot rejection, flusher claims, retries, demo seeding, transcript highlighting, live transcript drafts, speech cues, and reconnect merge.
 
 ## Known limitations
 

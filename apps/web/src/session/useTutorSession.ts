@@ -1,19 +1,23 @@
 import {
+  DISCONNECT_GRACE_MS,
   LIMITS,
   RPC_SET_MODE,
   TOPIC_CHAT,
   TOPIC_TUTOR_EVENTS,
   decodeTutorEvent,
+  waitsForReconnect,
   type Correction,
   type Mode,
   type SessionReview,
   type Turn,
 } from '@tutor/core/browser';
-import { Room, RoomEvent, type RemoteParticipant } from 'livekit-client';
+import { DisconnectReason, Room, RoomEvent, type RemoteParticipant } from 'livekit-client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
+import { mergeById } from './mergeById';
+import { rejoinSameRoom, type RoomCredentials } from './rejoin';
 
-export type ConnectionStatus = 'connecting' | 'connected' | 'failed';
+export type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'failed';
 
 export interface PendingMessage {
   key: string;
@@ -53,6 +57,8 @@ export function useTutorSession(sessionId: string, initial: SessionReview, initi
   const [deadline] = useState(() => Date.now() + initial.session.remainingMs);
   const [attempt, setAttempt] = useState(0);
   const modeRef = useRef(initialMode);
+  const credentials = useRef<RoomCredentials | null>(null);
+  const rejoining = useRef(false);
 
   const applyMode = useCallback((next: Mode) => {
     modeRef.current = next;
@@ -79,6 +85,7 @@ export function useTutorSession(sessionId: string, initial: SessionReview, initi
       try {
         const details = await api.connect(sessionId, modeRef.current);
         if (cancelled) return;
+        credentials.current = { serverUrl: details.serverUrl, token: details.token };
         await room.connect(details.serverUrl, details.token);
         if (cancelled) return;
         if (modeRef.current === 'voice') await enableMicrophone(true);
@@ -94,6 +101,79 @@ export function useTutorSession(sessionId: string, initial: SessionReview, initi
       void room.disconnect();
     };
   }, [room, sessionId, attempt, enableMicrophone]);
+
+  useEffect(() => {
+    const abort = { aborted: false };
+    const fillGaps = () => {
+      api.session(sessionId).then(
+        (latest) => {
+          setTurns((prev) => mergeById(prev, latest.turns));
+          setCorrections((prev) => mergeById(prev, latest.corrections));
+          setCompletedGoals((prev) => [...new Set([...prev, ...latest.session.completedGoals])]);
+          const typed = new Set(
+            latest.turns
+              .filter((t) => t.role === 'learner' && t.modality === 'text')
+              .map((t) => t.text),
+          );
+          setPending((prev) => prev.filter((p) => !typed.has(p.text)));
+        },
+        // Best effort: live events keep flowing, this only fills what the outage dropped.
+        () => undefined,
+      );
+    };
+    const onReconnecting = () => setStatus('reconnecting');
+    const onReconnected = () => {
+      setStatus('connected');
+      fillGaps();
+    };
+    const fail = () => {
+      setStatus('failed');
+      setError((prev) => prev ?? 'Lost the connection to your tutor.');
+    };
+    const onDisconnected = (reason?: DisconnectReason) => {
+      if (reason === DisconnectReason.CLIENT_INITIATED) return;
+      const name = reason === undefined ? undefined : DisconnectReason[reason];
+      if (!waitsForReconnect(typeof name === 'string' ? name : undefined)) {
+        fail();
+        return;
+      }
+      const saved = credentials.current;
+      if (!saved || rejoining.current) {
+        if (!saved) fail();
+        return;
+      }
+      rejoining.current = true;
+      setStatus('reconnecting');
+      setError(null);
+      void rejoinSameRoom(
+        async (creds) => {
+          await room.connect(creds.serverUrl, creds.token);
+          if (abort.aborted) return;
+          if (modeRef.current === 'voice') await enableMicrophone(true);
+        },
+        saved,
+        { deadline: Date.now() + DISCONNECT_GRACE_MS, signal: abort },
+      ).then((ok) => {
+        rejoining.current = false;
+        if (abort.aborted) return;
+        if (ok) {
+          setStatus('connected');
+          setError(null);
+          fillGaps();
+        } else fail();
+      });
+    };
+    room.on(RoomEvent.Reconnecting, onReconnecting);
+    room.on(RoomEvent.Reconnected, onReconnected);
+    room.on(RoomEvent.Disconnected, onDisconnected);
+    return () => {
+      abort.aborted = true;
+      rejoining.current = false;
+      room.off(RoomEvent.Reconnecting, onReconnecting);
+      room.off(RoomEvent.Reconnected, onReconnected);
+      room.off(RoomEvent.Disconnected, onDisconnected);
+    };
+  }, [room, sessionId, enableMicrophone]);
 
   useEffect(() => {
     const onData = (

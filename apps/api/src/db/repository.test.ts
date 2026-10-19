@@ -31,6 +31,7 @@ describe.skipIf(!databaseUrl)('PgStatsRepository (requires TEST_DATABASE_URL)', 
     textMs: 30_000,
     latencySumMs: 1_200,
     latencyCount: 2,
+    endReason: null,
     ...overrides,
   });
 
@@ -97,6 +98,50 @@ describe.skipIf(!databaseUrl)('PgStatsRepository (requires TEST_DATABASE_URL)', 
     const review = await repo.getReview(s.id);
     expect(review?.turns).toHaveLength(2);
     expect(review?.summary?.headline).toBe('Nice');
+  });
+
+  it('appends a turn tail after the stored sequence', async () => {
+    const s = session(randomUUID());
+    const snapshot = { session: s, corrections: [], goals: [], summary: null };
+    await repo.saveSnapshot({ ...snapshot, turns: [turn(0), turn(1)] });
+    expect(await repo.nextTurnSeq(s.id)).toBe(2);
+
+    await repo.saveSnapshot({ ...snapshot, firstSeq: 2, turns: [turn(2)] });
+    const review = await repo.getReview(s.id);
+    expect(review?.turns.map((t) => t.id)).toEqual(['t0', 't1', 't2']);
+    expect(review?.session.turnCount).toBe(3);
+  });
+
+  it('ignores a snapshot older than the stored one', async () => {
+    const s = session(randomUUID(), { lastActiveAt: day + 10_000, voiceMs: 90_000 });
+    const snapshot = { turns: [], corrections: [], summary: null };
+    await repo.saveSnapshot({ ...snapshot, session: s, goals: ['greet'] });
+    await repo.saveSnapshot({
+      ...snapshot,
+      session: { ...s, lastActiveAt: day + 5_000, voiceMs: 60_000 },
+      goals: [],
+    });
+    const review = await repo.getReview(s.id);
+    expect(review?.session).toMatchObject({ voiceMs: 90_000, completedGoals: ['greet'] });
+  });
+
+  it('does not reopen an ended session', async () => {
+    const s = session(randomUUID());
+    const snapshot = { turns: [], corrections: [], goals: [], summary: null };
+    await repo.saveSnapshot({ ...snapshot, session: { ...s, status: 'ended', endedAt: day + 1 } });
+    await repo.saveSnapshot({ ...snapshot, session: { ...s, lastActiveAt: day + 60_000 } });
+    expect((await repo.getReview(s.id))?.session.status).toBe('ended');
+  });
+
+  it('accepts an ending snapshot even when its timestamp is older', async () => {
+    const s = session(randomUUID(), { lastActiveAt: day + 10_000 });
+    const snapshot = { turns: [], corrections: [], goals: [], summary: null };
+    await repo.saveSnapshot({ ...snapshot, session: s });
+    await repo.saveSnapshot({
+      ...snapshot,
+      session: { ...s, status: 'ended', endedAt: day + 5_000, lastActiveAt: day + 5_000 },
+    });
+    expect((await repo.getReview(s.id))?.session.status).toBe('ended');
   });
 
   it('builds dashboard aggregates across days', async () => {

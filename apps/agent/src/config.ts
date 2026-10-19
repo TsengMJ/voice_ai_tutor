@@ -27,13 +27,33 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AgentConfig {
 }
 
 export interface SpeechOptions {
+  model: string;
   language: string;
   modelOptions: Record<string, string>;
 }
 
+/**
+ * English practice uses the English Flux model. The multilingual one guesses the
+ * language and mishears short phrases. Other languages stay on multilingual Flux
+ * with the practice language as a hint.
+ */
 export function speechOptionsFor(sttModel: string, languageCode: string): SpeechOptions {
-  if (sttModel === 'deepgram/flux-general-multi') {
-    return { language: 'multi', modelOptions: { language_hint: languageCode } };
+  if (sttModel === 'deepgram/flux-general-multi' && languageCode === 'en') {
+    return { model: 'deepgram/flux-general-en', language: 'en', modelOptions: {} };
   }
-  return { language: languageCode, modelOptions: {} };
+  if (sttModel === 'deepgram/flux-general-multi') {
+    return { model: sttModel, language: 'multi', modelOptions: { language_hint: languageCode } };
+  }
+  return { model: sttModel, language: languageCode, modelOptions: {} };
+}
+
+/**
+ * Ask Cartesia for a timestamp on every word. The agent's transcript synchronizer
+ * then reveals each word when that word is actually spoken, instead of guessing
+ * from a fixed English syllable rate that lags Sonic-3 and dumps the remainder
+ * when the audio ends.
+ */
+export function ttsOptionsFor(ttsModel: string): { add_timestamps: true } | Record<string, never> {
+  if (ttsModel.startsWith('cartesia/')) return { add_timestamps: true };
+  return {};
 }

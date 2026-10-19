@@ -113,6 +113,7 @@ export async function seedDemoHistory(
       textMs,
       latencySumMs: 640 + ((i * 53) % 220),
       latencyCount: 1,
+      endReason: null,
     };
     const goals = scenario.goals.slice(0, 1 + (i % scenario.goals.length)).map((g) => g.id);
     await repo.saveSnapshot({

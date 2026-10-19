@@ -30,6 +30,21 @@ export const LIMITS = {
   staleSessionMs: 15 * 60_000,
 } as const;
 
+/** How long the agent and the browser keep the same room after an unexpected disconnect. */
+export const DISCONNECT_GRACE_MS = 30_000;
+
+export const ABNORMAL_CLIENT_DISCONNECT = 'abnormal_client_disconnect';
+
+/**
+ * LiveKit already closes the agent for these. Anything else, including an unknown reason,
+ * keeps the room open so a dropped connection can rejoin.
+ */
+const IMMEDIATE_DISCONNECT_REASONS = new Set(['CLIENT_INITIATED', 'ROOM_DELETED', 'USER_REJECTED']);
+
+export function waitsForReconnect(reason: string | undefined): boolean {
+  return reason === undefined || !IMMEDIATE_DISCONNECT_REASONS.has(reason);
+}
+
 export const TurnSchema = z.object({
   id: z.string().min(1),
   role: z.enum(ROLES),
@@ -67,6 +82,7 @@ export const SessionStateSchema = z.object({
   textMs: z.number().int().nonnegative(),
   latencySumMs: z.number().int().nonnegative(),
   latencyCount: z.number().int().nonnegative(),
+  endReason: z.literal(ABNORMAL_CLIENT_DISCONNECT).nullable().default(null),
 });
 export type SessionState = z.infer<typeof SessionStateSchema>;
 
@@ -75,6 +91,7 @@ export interface SessionSummary {
   strengths: string[];
   focus: { title: string; tip: string }[];
   source: 'model' | 'fallback';
+  endReason?: typeof ABNORMAL_CLIENT_DISCONNECT;
 }
 
 export function averageLatencyMs(session: Pick<SessionState, 'latencySumMs' | 'latencyCount'>) {

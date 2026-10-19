@@ -12,6 +12,7 @@ const STATE_LABEL: Record<string, string> = {
   listening: 'Listening',
   thinking: 'Thinking…',
   speaking: 'Speaking',
+  reconnecting: 'Reconnecting…',
   failed: 'Connection lost',
 };
 
@@ -28,7 +29,12 @@ export function TutorOrb({
 }) {
   const { state, audioTrack, agent } = useVoiceAssistant();
   const bands = useMultibandTrackVolume(audioTrack, { bands: 5, loPass: 100, hiPass: 200 });
-  const effective = status === 'connected' && !agent ? 'initializing' : state;
+  const effective =
+    status === 'reconnecting'
+      ? 'reconnecting'
+      : status === 'connected' && !agent
+        ? 'initializing'
+        : state;
   const label =
     mode === 'text' && effective === 'listening'
       ? 'Waiting for your message'

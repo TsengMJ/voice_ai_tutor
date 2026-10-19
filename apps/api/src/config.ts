@@ -16,6 +16,7 @@ const EnvSchema = z.object({
   GOOGLE_API_KEY: z.string().min(1),
   AGENT_NAME: z.string().default(AGENT_NAME_DEFAULT),
   GEMINI_TEXT_MODEL: z.string().default('gemini-2.5-flash'),
+  GEMINI_HINT_MODEL: z.string().default('gemini-3.5-flash-lite'),
   COOKIE_SECRET: z.string().min(16, 'COOKIE_SECRET must be at least 16 characters'),
   COOKIE_SECURE: booleanString.default(false),
   CORS_ORIGIN: z.string().default('http://localhost:3000'),

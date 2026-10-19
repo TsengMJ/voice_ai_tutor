@@ -49,6 +49,28 @@ describe.skipIf(!redisUrl)('RedisSessionStore (requires REDIS_URL)', () => {
     expect(turns.map((t) => t.id)).toEqual(['t3', 't4']);
   });
 
+  it('reads turns from a sequence number to the end', async () => {
+    for (let i = 0; i < 4; i++) {
+      await store.appendTurn(sessionId, {
+        id: `t${i}`,
+        role: 'learner',
+        modality: 'text',
+        text: `turn ${i}`,
+        interrupted: false,
+        ts: 2_000 + i,
+      });
+    }
+    expect((await store.listTurnsFrom(sessionId, 2)).map((t) => t.id)).toEqual(['t2', 't3']);
+    expect(await store.listTurnsFrom(sessionId, 4)).toEqual([]);
+  });
+
+  it('keeps an active pointer that already moved to a newer session', async () => {
+    const newer = randomUUID();
+    await store.setActiveSession(learnerId, newer);
+    await store.clearActiveSession(learnerId, sessionId);
+    expect(await store.getActiveSession(learnerId)).toBe(newer);
+  });
+
   it('deduplicates completed goals', async () => {
     await store.completeGoal(sessionId, 'greet');
     expect(await store.completeGoal(sessionId, 'greet')).toEqual(['greet']);
@@ -63,6 +85,25 @@ describe.skipIf(!redisUrl)('RedisSessionStore (requires REDIS_URL)', () => {
   it('marks writes as pending a flush', async () => {
     await store.setMode(sessionId, 'text', 5_000);
     expect(await redis.sismember(redisKeys.flushPending, sessionId)).toBe(1);
+  });
+
+  it('returns a claim abandoned before its flush to the dirty set', async () => {
+    await redis.del(redisKeys.flushPending, redisKeys.flushClaimed);
+    await store.markDirty(sessionId);
+    expect(await store.takeDirty(10, 1_000)).toEqual([sessionId]);
+    expect(await store.requeueStaleClaims(999)).toBe(0);
+
+    expect(await store.requeueStaleClaims(1_000)).toBe(1);
+    expect(await store.takeDirty(10, 2_000)).toEqual([sessionId]);
+  });
+
+  it('forgets an acknowledged claim', async () => {
+    await redis.del(redisKeys.flushPending, redisKeys.flushClaimed);
+    await store.markDirty(sessionId);
+    await store.takeDirty(10, 1_000);
+    await store.ackDirty(sessionId);
+    expect(await store.requeueStaleClaims(Number.MAX_SAFE_INTEGER)).toBe(0);
+    expect(await store.takeDirty(10, 2_000)).toEqual([]);
   });
 
   it('ending a session clears the learner active pointer', async () => {

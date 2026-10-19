@@ -18,18 +18,38 @@ import type { StatsRepository } from '../db/repository.js';
 import { AppError, notFound } from '../errors.js';
 import { fallbackSummary, type TutorAnalyst } from './analyst.js';
 import type { LiveKitGateway } from './livekit.js';
+import { LockBusyError, withLock, type Locks } from './locks.js';
 
 /** Lets the agent finish its spoken wrap-up before a timed-out session is closed. */
 const TIME_UP_GRACE_MS = 60_000;
+
+/** Covers a Postgres flush plus summary generation. */
+const SESSION_LOCK_TTL_MS = 30_000;
+/** Covers ending the previous session while starting a new one. */
+const LEARNER_LOCK_TTL_MS = 60_000;
+const LOCK_WAIT_MS = 15_000;
+/** One replica sweeps per lease; the lease is left to expire so staggered timers do not repeat it. */
+const SWEEP_LEASE_MS = 10_000;
+
+const sessionLock = (sessionId: string) => `flush:${sessionId}`;
+const learnerLock = (learnerId: string) => `learner:${learnerId}`;
 
 export interface SessionServiceDeps {
   store: SessionStore;
   repo: StatsRepository;
   livekit: LiveKitGateway;
   analyst: TutorAnalyst;
+  locks: Locks;
   logger: Logger;
   now: () => number;
   newId: () => string;
+}
+
+function busyAsConflict(err: unknown): never {
+  if (err instanceof LockBusyError) {
+    throw new AppError(409, 'busy', 'This session is still being saved. Try again in a moment.');
+  }
+  throw err;
 }
 
 export interface CreateSessionInput {
@@ -49,17 +69,20 @@ export class SessionService {
     if (!isValidTimeZone(input.timezone)) {
       throw new AppError(400, 'invalid_timezone', `Unknown time zone: ${input.timezone}`);
     }
-    const previous = await this.deps.store.getActiveSession(learnerId);
-    if (previous) await this.endInternal(previous);
+    const lock = { ttlMs: LEARNER_LOCK_TTL_MS, waitMs: LOCK_WAIT_MS };
+    return withLock(this.deps.locks, learnerLock(learnerId), lock, async () => {
+      const previous = await this.deps.store.getActiveSession(learnerId);
+      if (previous) await this.endInternal(previous, LOCK_WAIT_MS);
 
-    const session = await this.deps.store.create({
-      id: this.deps.newId(),
-      learnerId,
-      ...input,
-      now: this.deps.now(),
-    });
-    await this.deps.store.setActiveSession(learnerId, session.id);
-    return this.toView(session, 0, []);
+      const session = await this.deps.store.create({
+        id: this.deps.newId(),
+        learnerId,
+        ...input,
+        now: this.deps.now(),
+      });
+      await this.deps.store.setActiveSession(learnerId, session.id);
+      return this.toView(session, 0, []);
+    }).catch(busyAsConflict);
   }
 
   async connect(learnerId: string, sessionId: string, mode: Mode): Promise<ConnectionDetails> {
@@ -67,7 +90,7 @@ export class SessionService {
     const now = this.deps.now();
     const remainingMs = remainingSessionMs(session.startedAt, now);
     if (remainingMs === 0) {
-      await this.endInternal(sessionId);
+      await this.endInternal(sessionId, LOCK_WAIT_MS).catch(busyAsConflict);
       throw new AppError(409, 'time_up', 'This session has reached its time limit.');
     }
     const roomName = `tutor-${sessionId}-${this.deps.newId().slice(0, 8)}`;
@@ -103,7 +126,7 @@ export class SessionService {
   async end(learnerId: string, sessionId: string): Promise<SessionReview> {
     const session = await this.deps.store.get(sessionId);
     if (session && session.learnerId !== learnerId) throw notFound('Session');
-    if (session) await this.endInternal(sessionId);
+    if (session) await this.endInternal(sessionId, LOCK_WAIT_MS).catch(busyAsConflict);
     return this.review(learnerId, sessionId);
   }
 
@@ -142,20 +165,43 @@ export class SessionService {
     return alive ? id : null;
   }
 
-  /** Copies the hot Redis state for a session into Postgres. */
+  /**
+   * Copies the hot Redis state for a session into Postgres, writing only turns not yet stored.
+   * When another replica holds the session, it is re-queued for the next tick.
+   */
   async flush(sessionId: string): Promise<void> {
+    try {
+      await withLock(this.deps.locks, sessionLock(sessionId), { ttlMs: SESSION_LOCK_TTL_MS }, () =>
+        this.flushLocked(sessionId),
+      );
+    } catch (err) {
+      if (!(err instanceof LockBusyError)) throw err;
+      await this.deps.store.markDirty(sessionId);
+    }
+  }
+
+  private async flushLocked(sessionId: string): Promise<void> {
     const session = await this.deps.store.get(sessionId);
     if (!session) return;
+    const firstSeq = await this.deps.repo.nextTurnSeq(sessionId);
     const [turns, corrections, goals] = await Promise.all([
-      this.deps.store.listTurns(sessionId),
+      this.deps.store.listTurnsFrom(sessionId, firstSeq),
       this.deps.store.listCorrections(sessionId),
       this.deps.store.listGoals(sessionId),
     ]);
-    await this.deps.repo.saveSnapshot({ session, turns, corrections, goals, summary: null });
+    await this.deps.repo.saveSnapshot({
+      session,
+      firstSeq,
+      turns,
+      corrections,
+      goals,
+      summary: null,
+    });
   }
 
   /** Ends sessions the learner abandoned or that ran past their time limit. */
   async sweepStale(): Promise<number> {
+    if (!(await this.deps.locks.acquire('sweep', SWEEP_LEASE_MS))) return 0;
     const now = this.deps.now();
     let ended = 0;
     for (const id of await this.deps.store.listActiveSessionIds()) {
@@ -167,19 +213,28 @@ export class SessionService {
       const timeUp =
         remainingSessionMs(session.startedAt, now) === 0 &&
         now - session.lastActiveAt > TIME_UP_GRACE_MS;
-      if (isStale(session.lastActiveAt, now) || timeUp) {
-        await this.endInternal(id);
-        ended += 1;
+      if (session.endReason || isStale(session.lastActiveAt, now) || timeUp) {
+        try {
+          if (await this.endInternal(id, 0)) ended += 1;
+        } catch (err) {
+          if (!(err instanceof LockBusyError)) throw err;
+        }
       }
     }
     return ended;
   }
 
-  private async endInternal(sessionId: string): Promise<void> {
+  /** Returns true when this call ended the session. Throws LockBusyError after `waitMs`. */
+  private endInternal(sessionId: string, waitMs: number): Promise<boolean> {
+    const lock = { ttlMs: SESSION_LOCK_TTL_MS, waitMs };
+    return withLock(this.deps.locks, sessionLock(sessionId), lock, () => this.endLocked(sessionId));
+  }
+
+  private async endLocked(sessionId: string): Promise<boolean> {
     const before = await this.deps.store.get(sessionId);
-    if (!before || before.status === 'ended') return;
+    if (!before || before.status === 'ended') return false;
     const session = await this.deps.store.end(sessionId, this.deps.now());
-    if (!session) return;
+    if (!session) return false;
 
     const [turns, corrections, goals] = await Promise.all([
       this.deps.store.listTurns(sessionId),
@@ -197,13 +252,20 @@ export class SessionService {
         this.deps.logger.warn({ err, sessionId }, 'summary generation failed; using fallback');
         return fallbackSummary(corrections);
       });
-    await this.deps.repo.saveSnapshot({ session, turns, corrections, goals, summary });
+    await this.deps.repo.saveSnapshot({
+      session,
+      turns,
+      corrections,
+      goals,
+      summary: session.endReason ? { ...summary, endReason: session.endReason } : summary,
+    });
 
     if (session.roomName) {
       await this.deps.livekit.deleteRoom(session.roomName).catch((err) => {
         this.deps.logger.debug({ err, sessionId }, 'room already gone');
       });
     }
+    return true;
   }
 
   private async requireActive(learnerId: string, sessionId: string): Promise<SessionState> {

@@ -41,6 +41,46 @@ describe('SessionService.create', () => {
     await service.create(LEARNER, input);
     expect((await store.get(first.id))?.status).toBe('ended');
   });
+
+  it('leaves one active session when two creates race', async () => {
+    const { service, store } = buildTestService();
+    await Promise.all([service.create(LEARNER, input), service.create(LEARNER, input)]);
+    expect(await store.listActiveSessionIds()).toHaveLength(1);
+  });
+});
+
+describe('SessionService.flush', () => {
+  const turn = (i: number) => ({
+    id: `t${i}`,
+    role: 'learner' as const,
+    modality: 'text' as const,
+    text: `line ${i}`,
+    interrupted: false,
+    ts: 1_000_000 + i,
+  });
+
+  it('reads only turns after the persisted sequence', async () => {
+    const { service, store, repo } = buildTestService();
+    const view = await service.create(LEARNER, input);
+    for (const i of [0, 1, 2]) await store.appendTurn(view.id, turn(i));
+    await service.flush(view.id);
+    for (const i of [3, 4]) await store.appendTurn(view.id, turn(i));
+    await service.flush(view.id);
+
+    expect(repo.saved.at(-1)).toMatchObject({ firstSeq: 3, turns: [turn(3), turn(4)] });
+    expect(repo.snapshots.get(view.id)?.turns).toHaveLength(5);
+  });
+
+  it('re-queues the session when another replica holds it', async () => {
+    const { service, store, repo, locks } = buildTestService();
+    const view = await service.create(LEARNER, input);
+    store.dirty.clear();
+    await locks.acquire(`flush:${view.id}`, 60_000);
+
+    await service.flush(view.id);
+    expect(repo.saved).toHaveLength(0);
+    expect(store.dirty.has(view.id)).toBe(true);
+  });
 });
 
 describe('SessionService.connect', () => {
@@ -120,9 +160,37 @@ describe('SessionService.sweepStale', () => {
     expect((await store.get(view.id))?.status).toBe('ended');
   });
 
+  it('ends a session the agent marked after the reconnect grace', async () => {
+    const { service, store, repo } = buildTestService();
+    const view = await service.create(LEARNER, input);
+    await store.setEndReason(view.id, 'abnormal_client_disconnect');
+    expect(await service.sweepStale()).toBe(1);
+    expect((await store.get(view.id))?.status).toBe('ended');
+    expect(repo.snapshots.get(view.id)?.summary?.endReason).toBe('abnormal_client_disconnect');
+  });
+
   it('leaves active sessions alone', async () => {
     const { service } = buildTestService();
     await service.create(LEARNER, input);
+    expect(await service.sweepStale()).toBe(0);
+  });
+
+  it('skips a stale session another replica is saving', async () => {
+    let now = 0;
+    const { service, store, locks } = buildTestService({ now: () => now });
+    const view = await service.create(LEARNER, input);
+    await locks.acquire(`flush:${view.id}`, 60_000);
+    now = LIMITS.staleSessionMs + 1;
+    expect(await service.sweepStale()).toBe(0);
+    expect((await store.get(view.id))?.status).toBe('active');
+  });
+
+  it('runs once per lease across replicas', async () => {
+    let now = 0;
+    const { service, locks } = buildTestService({ now: () => now });
+    await service.create(LEARNER, input);
+    await locks.acquire('sweep', 60_000);
+    now = LIMITS.staleSessionMs + 1;
     expect(await service.sweepStale()).toBe(0);
   });
 });

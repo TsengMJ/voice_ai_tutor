@@ -8,10 +8,12 @@ import type {
 } from '../db/repository.js';
 import type { TutorAnalyst } from '../services/analyst.js';
 import type { LiveKitGateway } from '../services/livekit.js';
+import { InMemoryLocks } from '../services/locks.js';
 import { SessionService } from '../services/sessionService.js';
 
 export class FakeRepository implements StatsRepository {
   readonly snapshots = new Map<string, SessionSnapshot>();
+  readonly saved: SessionSnapshot[] = [];
   readonly learners = new Map<string, boolean>();
 
   async ping() {}
@@ -24,11 +26,20 @@ export class FakeRepository implements StatsRepository {
   async upsertScenarios(_scenarios: readonly Scenario[]) {}
 
   async saveSnapshot(snapshot: SessionSnapshot) {
+    this.saved.push(snapshot);
     const previous = this.snapshots.get(snapshot.session.id);
+    const stored = previous?.turns ?? [];
+    const skip = Math.max(0, stored.length - (snapshot.firstSeq ?? 0));
     this.snapshots.set(snapshot.session.id, {
       ...snapshot,
+      firstSeq: 0,
+      turns: [...stored, ...snapshot.turns.slice(skip)],
       summary: snapshot.summary ?? previous?.summary ?? null,
     });
+  }
+
+  async nextTurnSeq(sessionId: string) {
+    return this.snapshots.get(sessionId)?.turns.length ?? 0;
   }
 
   async getReview(sessionId: string): Promise<StoredReview | null> {
@@ -124,15 +135,17 @@ export function buildTestService(overrides: { now?: () => number } = {}) {
   const repo = new FakeRepository();
   const livekit = new FakeLiveKit();
   const analyst = new FakeAnalyst();
+  const locks = new InMemoryLocks();
   let counter = 0;
   const service = new SessionService({
     store,
     repo,
     livekit,
     analyst,
+    locks,
     logger: pino({ level: 'silent' }),
     now: overrides.now ?? (() => 1_000_000),
     newId: () => `00000000-0000-4000-8000-${String(++counter).padStart(12, '0')}`,
   });
-  return { service, store, repo, livekit, analyst };
+  return { service, store, repo, livekit, analyst, locks };
 }

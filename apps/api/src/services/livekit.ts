@@ -3,8 +3,9 @@ import {
   RoomAgentDispatch,
   RoomConfiguration,
   RoomServiceClient,
+  TwirpError,
 } from 'livekit-server-sdk';
-import type { DispatchMetadata } from '@tutor/core';
+import { retry, type DispatchMetadata } from '@tutor/core';
 
 export interface LiveKitGateway {
   readonly serverUrl: string;
@@ -61,6 +62,10 @@ export class LiveKitCloudGateway implements LiveKitGateway {
   }
 
   async deleteRoom(roomName: string) {
-    await this.rooms.deleteRoom(roomName);
+    await retry(() => this.rooms.deleteRoom(roomName), {
+      retries: 1,
+      delayMs: 500,
+      shouldRetry: (err) => !(err instanceof TwirpError && err.status < 500),
+    });
   }
 }

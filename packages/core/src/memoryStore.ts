@@ -10,6 +10,7 @@ export class InMemorySessionStore implements SessionStore {
   readonly goals = new Map<string, Set<string>>();
   readonly active = new Map<string, string>();
   readonly dirty = new Set<string>();
+  readonly claimed = new Map<string, number>();
 
   private mutate(id: string, patch: Partial<SessionState>) {
     const session = this.sessions.get(id);
@@ -35,6 +36,7 @@ export class InMemorySessionStore implements SessionStore {
       textMs: 0,
       latencySumMs: 0,
       latencyCount: 0,
+      endReason: null,
     };
     this.sessions.set(input.id, session);
     this.dirty.add(input.id);
@@ -61,6 +63,10 @@ export class InMemorySessionStore implements SessionStore {
   async listTurns(id: string, limit?: number) {
     const all = this.turns.get(id) ?? [];
     return limit === undefined ? [...all] : all.slice(-limit);
+  }
+
+  async listTurnsFrom(id: string, start: number) {
+    return (this.turns.get(id) ?? []).slice(start);
   }
 
   async countTurns(id: string) {
@@ -110,6 +116,11 @@ export class InMemorySessionStore implements SessionStore {
     });
   }
 
+  async setEndReason(id: string, reason: SessionState['endReason']) {
+    if (!reason) return;
+    this.mutate(id, { endReason: reason });
+  }
+
   async end(id: string, now: number) {
     const session = this.sessions.get(id);
     if (!session) return null;
@@ -139,9 +150,27 @@ export class InMemorySessionStore implements SessionStore {
     this.dirty.add(id);
   }
 
-  async takeDirty(max: number) {
+  async takeDirty(max: number, now: number) {
     const ids = [...this.dirty].slice(0, max);
-    for (const id of ids) this.dirty.delete(id);
+    for (const id of ids) {
+      this.dirty.delete(id);
+      this.claimed.set(id, now);
+    }
     return ids;
+  }
+
+  async ackDirty(id: string) {
+    this.claimed.delete(id);
+  }
+
+  async requeueStaleClaims(cutoff: number) {
+    let moved = 0;
+    for (const [id, claimedAt] of this.claimed) {
+      if (claimedAt > cutoff) continue;
+      this.claimed.delete(id);
+      this.dirty.add(id);
+      moved += 1;
+    }
+    return moved;
   }
 }

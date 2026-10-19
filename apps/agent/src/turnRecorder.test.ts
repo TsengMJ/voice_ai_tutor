@@ -66,6 +66,43 @@ describe('TurnRecorder', () => {
     expect(events).toEqual([]);
   });
 
+  it('retries a turn write that fails once', async () => {
+    const append = store.appendTurn.bind(store);
+    let failures = 1;
+    store.appendTurn = async (id, turn) => {
+      if (failures-- > 0) throw new Error('redis unavailable');
+      await append(id, turn);
+    };
+    recorder = new TurnRecorder({
+      store,
+      sessionId: SESSION_ID,
+      publish: async () => undefined,
+      currentMode: () => mode,
+      retryDelayMs: 1,
+    });
+    await recorder.record(message('assistant', 'Welcome!'));
+    expect(await store.countTurns(SESSION_ID)).toBe(1);
+  });
+
+  it('does not resend a turn write that timed out, since it may already be stored', async () => {
+    let attempts = 0;
+    store.appendTurn = async () => {
+      attempts += 1;
+      throw new Error('Command timed out');
+    };
+    recorder = new TurnRecorder({
+      store,
+      sessionId: SESSION_ID,
+      publish: async () => undefined,
+      currentMode: () => mode,
+      retryDelayMs: 1,
+    });
+    await expect(recorder.record(message('assistant', 'Welcome!'))).rejects.toThrow(
+      'Command timed out',
+    );
+    expect(attempts).toBe(1);
+  });
+
   it('persists and publishes the same turn', async () => {
     await recorder.record(message('assistant', 'Welcome!'));
     const [stored] = await store.listTurns(SESSION_ID);

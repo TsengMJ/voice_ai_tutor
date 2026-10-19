@@ -16,6 +16,8 @@ import type { Pool, PoolClient } from 'pg';
 
 export interface SessionSnapshot {
   session: SessionState;
+  /** Sequence number of `turns[0]`. Defaults to 0, meaning `turns` is the whole transcript. */
+  firstSeq?: number;
   turns: Turn[];
   corrections: Correction[];
   goals: string[];
@@ -39,6 +41,8 @@ export interface StatsRepository {
   isDemoLearner(id: string): Promise<boolean>;
   upsertScenarios(scenarios: readonly Scenario[]): Promise<void>;
   saveSnapshot(snapshot: SessionSnapshot): Promise<void>;
+  /** Sequence number of the next turn to store, i.e. how many turns are already persisted. */
+  nextTurnSeq(sessionId: string): Promise<number>;
   getReview(sessionId: string): Promise<StoredReview | null>;
   countSessions(learnerId: string): Promise<number>;
   getDashboard(learnerId: string, today: string): Promise<DashboardStats>;
@@ -62,6 +66,14 @@ interface SessionRow {
 }
 
 const ms = (value: unknown) => Number(value ?? 0);
+
+async function nextTurnSeq(db: Pool | PoolClient, sessionId: string): Promise<number> {
+  const { rows } = await db.query<{ next: number }>(
+    'select coalesce(max(seq) + 1, 0)::int as next from turns where session_id = $1',
+    [sessionId],
+  );
+  return rows[0]?.next ?? 0;
+}
 
 export class PgStatsRepository implements StatsRepository {
   constructor(private readonly pool: Pool) {}
@@ -96,7 +108,18 @@ export class PgStatsRepository implements StatsRepository {
     }
   }
 
-  async saveSnapshot({ session, turns, corrections, goals, summary }: SessionSnapshot) {
+  async nextTurnSeq(sessionId: string) {
+    return nextTurnSeq(this.pool, sessionId);
+  }
+
+  async saveSnapshot({
+    session,
+    firstSeq = 0,
+    turns,
+    corrections,
+    goals,
+    summary,
+  }: SessionSnapshot) {
     const localDay = dayInTimeZone(session.startedAt, session.timezone);
     await this.inTransaction(async (db) => {
       await db.query('insert into learners (id) values ($1) on conflict (id) do nothing', [
@@ -104,13 +127,21 @@ export class PgStatsRepository implements StatsRepository {
       ]);
       await db.query(
         `insert into sessions (id, learner_id, scenario_id, language, timezone, local_day, status, mode,
-           started_at, ended_at, voice_ms, text_ms, turn_count, goals_completed, avg_latency_ms, summary)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,to_timestamp($9/1000.0),to_timestamp($10/1000.0),$11,$12,$13,$14,$15,$16)
+           started_at, ended_at, voice_ms, text_ms, turn_count, goals_completed, avg_latency_ms, summary,
+           source_updated_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,to_timestamp($9/1000.0),to_timestamp($10/1000.0),$11,$12,$13,$14,$15,$16,
+           to_timestamp($17/1000.0))
          on conflict (id) do update set status = excluded.status, mode = excluded.mode,
            ended_at = excluded.ended_at, voice_ms = excluded.voice_ms, text_ms = excluded.text_ms,
            turn_count = excluded.turn_count, goals_completed = excluded.goals_completed,
            avg_latency_ms = excluded.avg_latency_ms,
-           summary = coalesce(excluded.summary, sessions.summary), updated_at = now()`,
+           summary = coalesce(excluded.summary, sessions.summary),
+           source_updated_at = greatest(excluded.source_updated_at, sessions.source_updated_at),
+           updated_at = now()
+         -- lastActiveAt comes from both agent and API clocks, so ending is accepted regardless of order.
+         where (sessions.status = 'active' and excluded.status = 'ended')
+           or (excluded.source_updated_at >= sessions.source_updated_at
+               and not (sessions.status = 'ended' and excluded.status = 'active'))`,
         [
           session.id,
           session.learnerId,
@@ -124,17 +155,34 @@ export class PgStatsRepository implements StatsRepository {
           session.endedAt,
           session.voiceMs,
           session.textMs,
-          turns.length,
+          firstSeq + turns.length,
           goals,
           averageLatencyMs(session),
           summary ? JSON.stringify(summary) : null,
+          session.lastActiveAt,
         ],
       );
-      for (const [seq, t] of turns.entries()) {
+      const stored = await nextTurnSeq(db, session.id);
+      const fresh = turns
+        .map((turn, i) => ({ seq: firstSeq + i, turn }))
+        .filter(({ seq }) => seq >= stored);
+      if (fresh.length > 0) {
         await db.query(
           `insert into turns (session_id, seq, id, role, modality, text, interrupted, created_at)
-           values ($1,$2,$3,$4,$5,$6,$7,to_timestamp($8/1000.0)) on conflict do nothing`,
-          [session.id, seq, t.id, t.role, t.modality, t.text, t.interrupted, t.ts],
+           select $1, t.seq, t.id, t.role, t.modality, t.text, t.interrupted, to_timestamp(t.ts/1000.0)
+           from unnest($2::int[], $3::text[], $4::text[], $5::text[], $6::text[], $7::bool[], $8::bigint[])
+             as t(seq, id, role, modality, text, interrupted, ts)
+           on conflict do nothing`,
+          [
+            session.id,
+            fresh.map((f) => f.seq),
+            fresh.map((f) => f.turn.id),
+            fresh.map((f) => f.turn.role),
+            fresh.map((f) => f.turn.modality),
+            fresh.map((f) => f.turn.text),
+            fresh.map((f) => f.turn.interrupted),
+            fresh.map((f) => f.turn.ts),
+          ],
         );
       }
       for (const c of corrections) {

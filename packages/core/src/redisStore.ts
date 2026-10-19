@@ -20,9 +20,27 @@ export const redisKeys = {
   learnerActive: (learnerId: string) => `learner:${learnerId}:active`,
   activeSessions: 'sessions:active',
   flushPending: 'flush:pending',
+  flushClaimed: 'flush:processing',
 };
 
+const DELETE_IF_EQUAL =
+  "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0";
+
+const CLAIM_DIRTY = `
+local ids = redis.call('SPOP', KEYS[1], ARGV[1])
+for _, id in ipairs(ids) do redis.call('ZADD', KEYS[2], ARGV[2], id) end
+return ids`;
+
+const REQUEUE_CLAIMS = `
+local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+for _, id in ipairs(ids) do
+  redis.call('SADD', KEYS[2], id)
+  redis.call('ZREM', KEYS[1], id)
+end
+return #ids`;
+
 const NULLABLE_NUMBER_FIELDS = new Set(['endedAt', 'lastTextAt']);
+const NULLABLE_STRING_FIELDS = new Set(['endReason']);
 const NUMBER_FIELDS = new Set([
   'startedAt',
   'endedAt',
@@ -43,7 +61,7 @@ function toHash(session: SessionState): Record<string, string> {
 function fromHash(hash: Record<string, string>): SessionState {
   const raw: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(hash)) {
-    if (NULLABLE_NUMBER_FIELDS.has(k) && v === '') raw[k] = null;
+    if ((NULLABLE_NUMBER_FIELDS.has(k) || NULLABLE_STRING_FIELDS.has(k)) && v === '') raw[k] = null;
     else if (NUMBER_FIELDS.has(k)) raw[k] = Number(v);
     else raw[k] = v;
   }
@@ -86,6 +104,7 @@ export class RedisSessionStore implements SessionStore {
       textMs: 0,
       latencySumMs: 0,
       latencyCount: 0,
+      endReason: null,
     };
     const tx = this.redis.multi().hset(redisKeys.session(input.id), toHash(session));
     tx.sadd(redisKeys.activeSessions, input.id);
@@ -118,6 +137,10 @@ export class RedisSessionStore implements SessionStore {
 
   async listTurns(id: string, limit?: number): Promise<Turn[]> {
     const start = limit === undefined ? 0 : -limit;
+    return parseList(await this.redis.lrange(redisKeys.turns(id), start, -1), TurnSchema);
+  }
+
+  async listTurnsFrom(id: string, start: number): Promise<Turn[]> {
     return parseList(await this.redis.lrange(redisKeys.turns(id), start, -1), TurnSchema);
   }
 
@@ -170,6 +193,12 @@ export class RedisSessionStore implements SessionStore {
     await this.touch(tx, id).exec();
   }
 
+  async setEndReason(id: string, reason: SessionState['endReason']): Promise<void> {
+    if (!reason) return;
+    const tx = this.redis.multi().hset(redisKeys.session(id), 'endReason', reason);
+    await this.touch(tx, id).exec();
+  }
+
   async end(id: string, now: number): Promise<SessionState | null> {
     await this.redis.srem(redisKeys.activeSessions, id);
     const session = await this.get(id);
@@ -198,8 +227,7 @@ export class RedisSessionStore implements SessionStore {
   }
 
   async clearActiveSession(learnerId: string, sessionId: string): Promise<void> {
-    const key = redisKeys.learnerActive(learnerId);
-    if ((await this.redis.get(key)) === sessionId) await this.redis.del(key);
+    await this.redis.eval(DELETE_IF_EQUAL, 1, redisKeys.learnerActive(learnerId), sessionId);
   }
 
   listActiveSessionIds(): Promise<string[]> {
@@ -210,8 +238,30 @@ export class RedisSessionStore implements SessionStore {
     await this.redis.sadd(redisKeys.flushPending, id);
   }
 
-  async takeDirty(max: number): Promise<string[]> {
-    const ids = await this.redis.spop(redisKeys.flushPending, max);
-    return ids ?? [];
+  async takeDirty(max: number, now: number): Promise<string[]> {
+    const ids = await this.redis.eval(
+      CLAIM_DIRTY,
+      2,
+      redisKeys.flushPending,
+      redisKeys.flushClaimed,
+      max,
+      now,
+    );
+    return ids as string[];
+  }
+
+  async ackDirty(id: string): Promise<void> {
+    await this.redis.zrem(redisKeys.flushClaimed, id);
+  }
+
+  async requeueStaleClaims(cutoff: number): Promise<number> {
+    const moved = await this.redis.eval(
+      REQUEUE_CLAIMS,
+      2,
+      redisKeys.flushClaimed,
+      redisKeys.flushPending,
+      cutoff,
+    );
+    return Number(moved);
   }
 }

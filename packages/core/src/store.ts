@@ -1,4 +1,4 @@
-import type { Correction, Mode, SessionState, Turn } from './domain.js';
+import type { ABNORMAL_CLIENT_DISCONNECT, Correction, Mode, SessionState, Turn } from './domain.js';
 
 export interface NewSession {
   id: string;
@@ -19,6 +19,8 @@ export interface SessionStore {
 
   appendTurn(id: string, turn: Turn): Promise<void>;
   listTurns(id: string, limit?: number): Promise<Turn[]>;
+  /** Turns from list index `start` (the transcript sequence number) to the end. */
+  listTurnsFrom(id: string, start: number): Promise<Turn[]>;
   countTurns(id: string): Promise<number>;
 
   addCorrection(id: string, correction: Correction): Promise<void>;
@@ -32,6 +34,9 @@ export interface SessionStore {
   recordTextActivity(id: string, now: number): Promise<void>;
   recordLatency(id: string, ms: number): Promise<void>;
 
+  /** Marks an active session for the flusher to end after the reconnect grace expires. */
+  setEndReason(id: string, reason: typeof ABNORMAL_CLIENT_DISCONNECT): Promise<void>;
+
   end(id: string, now: number): Promise<SessionState | null>;
 
   setActiveSession(learnerId: string, sessionId: string): Promise<void>;
@@ -40,5 +45,10 @@ export interface SessionStore {
   listActiveSessionIds(): Promise<string[]>;
 
   markDirty(id: string): Promise<void>;
-  takeDirty(max: number): Promise<string[]>;
+  /** Moves up to `max` dirty ids into a claimed set stamped with `now`, and returns them. */
+  takeDirty(max: number, now: number): Promise<string[]>;
+  /** Drops the claim once the session was flushed or re-marked dirty. */
+  ackDirty(id: string): Promise<void>;
+  /** Returns claims made at or before `cutoff` to the dirty set; resolves to how many moved. */
+  requeueStaleClaims(cutoff: number): Promise<number>;
 }

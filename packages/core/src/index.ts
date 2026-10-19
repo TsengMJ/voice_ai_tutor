@@ -6,6 +6,8 @@ export * from './protocol.js';
 export * from './prompts.js';
 export * from './timing.js';
 export * from './streak.js';
+export * from './retry.js';
 export * from './store.js';
 export * from './redisStore.js';
+export * from './redisOptions.js';
 export * from './memoryStore.js';

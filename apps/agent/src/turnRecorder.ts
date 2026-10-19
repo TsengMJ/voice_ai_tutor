@@ -1,4 +1,11 @@
-import type { Mode, SessionStore, Turn, TutorEvent } from '@tutor/core';
+import {
+  isRedisCommandTimeout,
+  retry,
+  type Mode,
+  type SessionStore,
+  type Turn,
+  type TutorEvent,
+} from '@tutor/core';
 
 export interface ConversationMessage {
   id: string;
@@ -13,6 +20,7 @@ export interface TurnRecorderDeps {
   sessionId: string;
   publish: (event: TutorEvent) => Promise<void>;
   currentMode: () => Mode;
+  retryDelayMs?: number;
 }
 
 /** Persists finished conversation items as transcript turns and mirrors them to the browser. */
@@ -36,14 +44,26 @@ export class TurnRecorder {
       const typed = this.pendingTextInputs > 0;
       if (typed) this.pendingTextInputs -= 1;
       turn = this.toTurn(message, text, 'learner', typed ? 'text' : 'voice');
-      if (typed) await this.deps.store.recordTextActivity(this.deps.sessionId, turn.ts);
+      if (typed) {
+        await this.withRetry(() =>
+          this.deps.store.recordTextActivity(this.deps.sessionId, turn.ts),
+        );
+      }
     } else {
       turn = this.toTurn(message, text, 'tutor', this.deps.currentMode());
     }
 
-    await this.deps.store.appendTurn(this.deps.sessionId, turn);
+    await this.withRetry(() => this.deps.store.appendTurn(this.deps.sessionId, turn));
     await this.deps.publish({ type: 'turn', turn });
     return turn;
+  }
+
+  private withRetry(write: () => Promise<void>) {
+    return retry(write, {
+      retries: 2,
+      delayMs: this.deps.retryDelayMs ?? 250,
+      shouldRetry: (err) => !isRedisCommandTimeout(err),
+    });
   }
 
   private toTurn(

@@ -5,7 +5,7 @@ import { Navigate, useNavigate, useParams } from 'react-router-dom';
 import { CorrectionCard } from '../components/CorrectionCard';
 import { GoalList } from '../components/GoalList';
 import { Button, Card, ErrorPanel, Eyebrow, Pill, Spinner, cx } from '../components/ui';
-import { api } from '../lib/api';
+import { api, isNotFound } from '../lib/api';
 import { formatDay, formatMinutes, languageLabel } from '../lib/format';
 import { highlightSegments } from '../lib/highlight';
 import { useAsync } from '../lib/useAsync';
@@ -16,7 +16,16 @@ export function ReviewPage() {
   const review = useAsync(() => api.session(id), [id]);
 
   if (review.loading && !review.data) return <Spinner label="Preparing your feedback" />;
-  if (review.error || !review.data) {
+  if (review.error && !isNotFound(review.error)) {
+    return (
+      <ErrorPanel
+        title="Couldn't load your feedback"
+        message={review.error.message}
+        action={<Button onClick={review.reload}>Try again</Button>}
+      />
+    );
+  }
+  if (!review.data) {
     return (
       <ErrorPanel
         title="Session not found"
@@ -216,7 +225,7 @@ function Review({ data }: { data: SessionReview }) {
             ) : (
               <div className="space-y-3">
                 {corrections.map((c) => (
-                  <CorrectionCard key={c.id} correction={c} />
+                  <CorrectionCard key={c.id} correction={c} language={session.language} />
                 ))}
               </div>
             )}
