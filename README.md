@@ -2,7 +2,7 @@
 
 Short role-play conversations with a tutor that **listens, lets you interrupt, quietly notes what to fix, and checks off goals as you hit them**. Talk out loud, or switch to typing mid-conversation without losing context. A dashboard tracks practice time, streaks and recurring mistakes.
 
-Built on **LiveKit Agents (Node)** with **Gemini Live speech-to-speech**, a Node API, React, Redis and Postgres. Everything runs with `docker compose up`.
+Built on **LiveKit Agents (Node)** with a streaming **speech-to-text → LLM → text-to-speech** pipeline (Deepgram Flux, Gemini 2.5 Flash, Cartesia Sonic-3 on LiveKit Inference), a Node API, React, Redis and Postgres. Everything runs with `docker compose up`.
 
 | Dashboard                                    | Scenario picker                                  |
 | -------------------------------------------- | ------------------------------------------------ |
@@ -10,13 +10,13 @@ Built on **LiveKit Agents (Node)** with **Gemini Live speech-to-speech**, a Node
 | **Session review**                           | **Mobile**                                       |
 | ![Review](docs/screenshots/review.png)       | ![Mobile](docs/screenshots/mobile-dashboard.png) |
 
-> The live session page needs real LiveKit and Gemini keys to show anything but its connection screen, so it's covered in the video walkthrough rather than a screenshot.
+> The live session page needs real LiveKit keys to show anything but its connection screen, so it's covered in the video walkthrough rather than a screenshot.
 
 ---
 
 ## Run it
 
-Prerequisites: Docker with Compose v2, a free [LiveKit Cloud](https://cloud.livekit.io) project, and a [Google AI Studio](https://aistudio.google.com/apikey) key.
+Prerequisites: Docker with Compose v2, a free [LiveKit Cloud](https://cloud.livekit.io) project (its keys also pay for the tutor's speech and LLM through LiveKit Inference, so no Deepgram or Cartesia accounts are needed), and a [Google AI Studio](https://aistudio.google.com/apikey) key for hints and summaries.
 
 ```bash
 cp .env.example .env      # fill in LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, GOOGLE_API_KEY, COOKIE_SECRET
@@ -51,13 +51,13 @@ I studied Speak, SpeakBuddy and Pimsleur before designing. The thing that separa
 
 - **Role-play scenarios with goals.** Three scenes (Beginner → Advanced), each with three concrete goals ("Order a drink with one customization"). The tutor calls a `complete_goal` tool when you achieve one, and the checklist ticks live. Goals give a beginner something to say and give the session an end.
 - **Corrections that don't interrupt.** Following Pimsleur's "don't break the flow" principle, the tutor only _recasts_ errors aloud (repeats your sentence correctly) and silently calls `record_correction`. A card appears beside the conversation with the original, the fix, a one-line why, and a category.
-- **Barge-in.** Gemini Live's server-side turn detection stops the tutor the moment you start speaking. Interrupted tutor turns are marked "cut off" in the transcript.
+- **Words appear as you speak, and barge-in.** Speech-to-text streams your words into the chat while you're still talking, and a "Got it" / "Thinking" cue covers the gap before the reply. Voice activity detection stops the tutor the moment you start speaking; interrupted tutor turns are marked "cut off" in the transcript.
 - **Voice ⇄ text, one conversation.** "I'm on the train" is a real use case. Switching modes is instant and the tutor keeps full context (see the architecture section for how).
 - **Hints when stuck.** One tap asks a text model for a natural next line plus translation; "Put it in the message box" pre-fills the composer.
 - **Review page.** Coach's notes (strengths and up to 3 focus areas), goals, every correction, and the full transcript with your corrected phrases highlighted. Like SpeakBuddy, detailed feedback lives after the session so it doesn't crowd the live view.
 - **Dashboard.** Today / week minutes, streak, average tutor response latency, 7-day chart, voice vs. text split, totals, recent sessions (resumable), and recurring mistake categories.
 - **Three target languages** (English, Spanish, Japanese), so a reviewer can actually be a learner.
-- **10-minute sessions.** Short, focused practice is the norm in this category, it caps cost, and it stays under Gemini Live's audio session limit.
+- **10-minute sessions.** Short, focused practice is the norm in this category, and it caps cost.
 - **Accessibility and polish.** Reduced-motion support, keyboard-friendly controls, ARIA live regions on the transcript and agent state, IME-safe Enter-to-send, mic-permission fallback to text mode.
 
 ---
@@ -70,7 +70,7 @@ flowchart LR
   api[Node API<br/>sessions · stats · hints]
   agent[Node agent worker<br/>LiveKit Agents]
   lk[LiveKit Cloud]
-  live[Gemini Live<br/>native audio]
+  inference[LiveKit Inference<br/>Flux STT · Gemini Flash · Sonic-3 TTS]
   flash[Gemini Flash<br/>text]
   redis[(Redis<br/>hot session state)]
   pg[(Postgres<br/>history · read model)]
@@ -78,7 +78,7 @@ flowchart LR
   web -->|REST /api| api
   web <-->|WebRTC audio · lk.chat text · RPC · events| lk
   lk <--> agent
-  agent <-->|speech-to-speech| live
+  agent <-->|audio in · text · audio out| inference
   agent -->|turns · corrections · goals · timings| redis
   api --> redis
   api -->|flush every 15s · on end| pg
@@ -91,7 +91,7 @@ The code is split along the three concerns the brief asks for:
 | ------------------------- | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Session management**    | `apps/api` (`SessionService`, `Flusher`, `http/learner.ts`) | Anonymous identity, create/resume/end, LiveKit tokens + agent dispatch, ownership checks, rate limits, time cap, persistence to Postgres, summaries.        |
 | **Conversation handling** | `packages/core` (`SessionStore`, `prompts`, `protocol`)     | The conversation record (turns, corrections, goals, timings) behind one interface with Redis and in-memory implementations; prompt assembly; wire protocol. |
-| **Voice / AI layer**      | `apps/agent`                                                | The realtime tutor: Gemini Live session, tools, mode switching, transcript recording, latency metrics. Talks to the rest of the system only via the store.  |
+| **Voice / AI layer**      | `apps/agent`                                                | The live tutor: STT → LLM → TTS session, tools, mode switching, transcript recording, latency metrics. Talks to the rest of the system only via the store.  |
 
 `packages/core` is the contract: the API, agent and web app all import the same zod schemas, scenario definitions and event types, so a field rename is a compile error everywhere instead of a runtime surprise.
 
@@ -110,11 +110,16 @@ Refreshing the page or losing the network repeats step 2: a new room, a new agen
 
 ## Key decisions and tradeoffs
 
-**Speech-to-speech (Gemini Live) instead of STT → LLM → TTS.** One model hears tone and hesitation and answers with natural prosody, without the latency of three chained hops, and barge-in is handled server-side. Time-to-first-audio is measured per turn and shown on the review page and dashboard. The cost: less control over each stage (no swapping in a specialist STT, no SSML), preview-model churn, and transcripts that come from the model rather than a dedicated ASR. For a conversation tutor, latency and naturalness matter most, so I took that trade. The model id is an env var, and the agent is a thin layer, so moving to a pipeline would replace `tutorSession.ts`, not the system.
+**A streaming STT → LLM → TTS pipeline, not speech-to-speech.** The first version used Gemini Live (one native-audio model). In testing, the learner's own words only appeared after the tutor had finished generating its reply, because the realtime model emits the user transcript at the end of the turn. For a language learner, seeing what the tutor heard is the feedback, so a seconds-long blank felt broken. The pipeline fixes that and gives control over each stage:
 
-**Voice and text share one realtime session.** The obvious design is a separate text path (REST → text LLM) with a reconnect on every switch. That gives the tutor two brains, and switching takes seconds. Instead, the browser stays in the room: text goes over LiveKit's `lk.chat` stream into the same Gemini session, and a `tutor.set_mode` RPC toggles the agent's audio input/output. Switching is instant and context is literally the same conversation. Tradeoff: text mode still occupies a realtime model session, so it costs more than a plain chat completion would.
+- **Deepgram Flux (multilingual) for speech-to-text.** Interim words stream into the chat while you talk, and Flux decides end of turn from the words and the pause together (`turnDetection: 'stt'`), so the tutor neither cuts you off mid-thought nor waits on a fixed silence timer. The practice language goes in as a hint.
+- **Gemini 2.5 Flash for the tutor.** Fast first token and reliable tool calls (`record_correction`, `complete_goal`).
+- **Cartesia Sonic-3 for text-to-speech.** Very low time to first audio, and one multilingual voice covers English, Spanish and Japanese.
+- **Silero VAD for barge-in.** It runs locally in the agent and stops the tutor's audio as soon as you start talking.
 
-**Model choice: `gemini-2.5-flash-native-audio-preview`, not 3.1.** The 3.1 live preview doesn't support `generateReply()` with instructions in the Node plugin, and the greeting, "welcome back", and the graceful time-up wrap-up all rely on it.
+All three models run on **LiveKit Inference**, billed to the LiveKit project, so there are no extra vendor keys and the agent no longer holds the Google key at all. Each model is an env var (`STT_MODEL`, `LLM_MODEL`, `TTS_MODEL`, `TTS_VOICE`), so swapping a vendor is a config change. The cost of this choice: three hops instead of one, so latency is the sum of the stages, and the tutor hears words rather than tone. Response latency is measured per reply as end of turn + LLM first token + TTS first audio, and shown on the review page and dashboard (about 2–3 s through Docker Desktop on a laptop in my tests).
+
+**Voice and text share one agent session.** The obvious design is a separate text path (REST → text LLM) with a reconnect on every switch. That gives the tutor two brains, and switching takes seconds. Instead, the browser stays in the room: text goes over LiveKit's `lk.chat` stream into the same LLM conversation, and a `tutor.set_mode` RPC toggles the agent's audio input/output. Switching is instant and context is literally the same conversation. With the pipeline, text mode simply skips speech-to-text and text-to-speech, so a typed turn costs only LLM tokens.
 
 **Tools for structured feedback, not post-hoc parsing.** Corrections and goals arrive as typed tool calls validated with zod at the moment they happen, so the UI can react live and the data is clean enough to aggregate on the dashboard. Unknown goal ids are rejected without touching state, so the model can't invent progress.
 
@@ -141,7 +146,7 @@ The agent never touches Postgres, which keeps the realtime path free of slow que
 
 ## Security
 
-- Secrets (`GOOGLE_API_KEY`, `LIVEKIT_API_SECRET`, `COOKIE_SECRET`) exist only in the api and agent containers. The browser bundle has no keys, and `.env` is git-ignored.
+- Secrets exist only in the containers that need them: `LIVEKIT_API_SECRET` in the api and agent, `GOOGLE_API_KEY` and `COOKIE_SECRET` in the api (compose blanks the Google key for the agent). The browser bundle has no keys, and `.env` is git-ignored.
 - LiveKit tokens last 10 minutes, are limited to one room, and carry server-set dispatch metadata. RPC calls to the agent are accepted only from the session's learner identity.
 - Another learner's session returns **404** (not 403, so ids can't be probed). Session ids are validated as UUIDs.
 - zod validation on every request and RPC payload; 16 KB JSON limit; 500-character messages; 10-minute session cap enforced by both the API (409 on reconnect) and the agent (timer → graceful goodbye).
@@ -158,13 +163,13 @@ What already scales: audio never touches the Node API (browser ↔ LiveKit ↔ a
 
 What I'd change:
 
-1. **Agent workers.** Each session is a long-lived job (~1 realtime model connection plus audio). Run agent workers as an autoscaled deployment. LiveKit dispatch load-balances jobs across registered workers and reports load, so scale on active jobs per worker (a few dozen per pod, since the model does the heavy lifting) rather than on CPU. Drain workers gracefully on deploy.
-2. **Model capacity.** 10k concurrent Gemini Live sessions is a quota and cost question before it's an engineering one. I'd negotiate quota, spread across regions or projects, add admission control (queue or "try again in a minute" instead of failing mid-session), and consider a cheaper pipeline model for text-only sessions.
+1. **Agent workers.** Each session is a long-lived job: audio in and out, one streaming STT socket, one TTS socket, and an LLM request per reply. VAD runs locally in the worker, so CPU per session is real but small. Run agent workers as an autoscaled deployment. LiveKit dispatch load-balances jobs across registered workers and each worker reports itself full at a CPU threshold, so scale on CPU and active jobs per pod. Drain workers gracefully on deploy.
+2. **Model capacity and cost.** 10k concurrent sessions is a quota and cost question before it's an engineering one. Cost per session is roughly STT minutes (while voice is on) + TTS characters (tutor speech) + LLM tokens per reply; text mode pays only the LLM part. I'd agree inference quota with LiveKit (or go direct to the vendors with our own keys at that volume), configure LiveKit Inference fallbacks (for example Nova-3 behind Flux), and add admission control (queue or "try again in a minute" instead of failing mid-session).
 3. **Redis.** Move to a managed Redis cluster. Keys are already per-session, so hash-tag them (`session:{id}:*`) to keep a session on one shard. Rate limiting and the active-session index work as they are.
 4. **Persistence.** Replace the polling flusher with a stream (Redis Streams or Kafka): agents emit turn and correction events, and a pool of consumers batch-inserts into Postgres. That removes the 15 s scan and spreads write load.
 5. **Postgres.** Partition `turns` by month, put the dashboard and review reads on a replica, use PgBouncer for connections, and update `daily_stats` incrementally from the event stream instead of recomputing per flush.
 6. **API.** Horizontally scaled behind a load balancer. Move summary generation to a background job so `end` returns instantly and the review page polls or streams it in.
-7. **Observability.** Per-session traces (join time, time-to-first-audio, model latency, interruptions), SLOs on response latency, and alerts on dispatch failures. The latency metric collected now is the seed of this.
+7. **Observability.** Per-session traces (join time, per-stage STT / LLM / TTS latency, interruptions), SLOs on response latency, and alerts on dispatch failures. The latency metric collected now is the seed of this.
 8. **Media.** LiveKit Cloud already handles SFU scaling and geo-routing. Self-hosting would mean a LiveKit cluster per region with Redis-backed routing.
 
 ---
@@ -173,7 +178,7 @@ What I'd change:
 
 ```
 apps/
-  agent/     LiveKit worker: tutorSession, tools, mode controller, turn recorder
+  agent/     LiveKit worker: tutorSession (STT → LLM → TTS), tools, mode controller, turn recorder, latency tracker
   api/       Express API: session service, flusher, Postgres repository, LiveKit + Gemini gateways
   web/       Vite + React + Tailwind: dashboard, practice, live session, review
 packages/
@@ -182,14 +187,15 @@ db/migrations/   SQL migrations, applied automatically on API start
 scripts/smoke.sh End-to-end check against the running stack
 ```
 
-Tests: 96 across the workspaces (Vitest). They cover prompt assembly, streak and timing math, protocol decoding, the Redis store, agent tool handlers and mode switching, the session service, the HTTP surface (auth, isolation, validation, rate limits), Postgres aggregation and idempotency, demo seeding, and transcript highlighting.
+Tests: 117 across the workspaces (Vitest). They cover prompt assembly, streak and timing math, protocol decoding, the Redis store, agent config, tool handlers, mode switching and latency accounting, the session service, the HTTP surface (auth, isolation, validation, rate limits), Postgres aggregation and idempotency, demo seeding, transcript highlighting, live transcript drafts and speech cues.
 
 ## Known limitations
 
-- Gemini Live models are previews; voices and behavior can change between versions.
-- Text time is an estimate (see above), and transcripts come from the realtime model, not a dedicated ASR.
+- The tutor hears words, not tone: hesitation and pronunciation only reach it through what speech-to-text writes down.
+- Text time is an estimate (see above).
+- Speech and LLM usage runs on LiveKit Inference credits; a free LiveKit project has a limited monthly allowance.
 - No user accounts. Clearing cookies starts a new learner.
-- Pronunciation feedback is limited to what the model notices in conversation; there's no phoneme-level scoring.
+- No phoneme-level pronunciation scoring.
 
 ## Video walkthrough script (~3 min)
 
