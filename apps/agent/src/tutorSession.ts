@@ -17,6 +17,7 @@ import {
   type TutorEvent,
 } from '@tutor/core';
 import { speechOptionsFor, type AgentConfig } from './config.js';
+import { LatencyTracker } from './latencyTracker.js';
 import { ModeController } from './modeController.js';
 import { TurnRecorder } from './turnRecorder.js';
 import { CompleteGoalArgs, RecordCorrectionArgs, createTutorToolHandlers } from './tutorTools.js';
@@ -145,11 +146,22 @@ export async function runTutorSession(ctx: JobContext, store: SessionStore, conf
       .catch((err) => logger.error({ err }, 'failed to record turn'));
   });
 
-  session.on(voice.AgentSessionEventTypes.MetricsCollected, (ev) => {
-    if (ev.metrics.type === 'realtime_model_metrics' && ev.metrics.ttftMs > 0) {
+  const latency = new LatencyTracker({
+    expectsAudio: () => modes.current === 'voice',
+    onLatency: (ms) => {
       store
-        .recordLatency(sessionId, ev.metrics.ttftMs)
+        .recordLatency(sessionId, Math.round(ms))
         .catch((err) => logger.error({ err }, 'failed to record latency'));
+    },
+  });
+
+  session.on(voice.AgentSessionEventTypes.MetricsCollected, ({ metrics: m }) => {
+    if (m.type === 'eou_metrics') {
+      latency.add({ kind: 'eou', speechId: m.speechId, ms: m.endOfUtteranceDelayMs });
+    } else if (m.type === 'llm_metrics' && !m.cancelled && m.ttftMs > 0) {
+      latency.add({ kind: 'llm', speechId: m.speechId, ms: m.ttftMs });
+    } else if (m.type === 'tts_metrics' && !m.cancelled && m.ttfbMs > 0) {
+      latency.add({ kind: 'tts', speechId: m.speechId, ms: m.ttfbMs });
     }
   });
 
